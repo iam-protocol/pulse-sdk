@@ -1,0 +1,44 @@
+{
+  "name": "@iam-protocol/pulse-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Client-side SDK for IAM Protocol — sensor capture, TBH generation, ZK proof construction",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "circomlibjs": "^0.1.7",
+    "snarkjs": "^0.7.6"
+  },
+  "peerDependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "^1.98.0",
+    "@solana/wallet-adapter-base": "^0.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@coral-xyz/anchor": { "optional": true },
+    "@solana/web3.js": { "optional": true },
+    "@solana/wallet-adapter-base": { "optional": true }
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "^1.98.0",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
