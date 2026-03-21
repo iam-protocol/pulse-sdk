@@ -31,6 +31,7 @@ const mockPublicSignals = [
   "111111111111111111111",
   "222222222222222222222",
   "30",
+  "3",
 ];
 
 describe("serializer", () => {

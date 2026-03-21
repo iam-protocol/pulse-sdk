@@ -22,6 +22,7 @@ export interface CircuitInput {
   commitment_new: string;
   commitment_prev: string;
   threshold: string;
+  min_distance: string;
 }
 
 /** Proof generation result */

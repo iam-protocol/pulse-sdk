@@ -10,7 +10,8 @@ export const BN254_SCALAR_FIELD = BigInt(
 
 export const FINGERPRINT_BITS = 256;
 export const DEFAULT_THRESHOLD = 30;
-export const NUM_PUBLIC_INPUTS = 3;
+export const DEFAULT_MIN_DISTANCE = 3;
+export const NUM_PUBLIC_INPUTS = 4;
 
 export const PROOF_A_SIZE = 64;
 export const PROOF_B_SIZE = 128;

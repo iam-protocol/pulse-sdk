@@ -35,7 +35,7 @@ type ResolvedConfig = Required<Pick<PulseConfig, "cluster" | "threshold">> &
 function extractFeatures(data: SensorData): number[] {
   const audioFeatures = data.audio
     ? extractMFCC(data.audio)
-    : new Array(156).fill(0);
+    : new Array(169).fill(0);
   const motionFeatures = extractMotionFeatures(data.motion);
   const touchFeatures = extractTouchFeatures(data.touch);
   return fuseFeatures(audioFeatures, motionFeatures, touchFeatures);

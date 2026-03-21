@@ -3,7 +3,7 @@ export { PulseSDK, PulseSession } from "./pulse";
 
 // Configuration
 export type { PulseConfig } from "./config";
-export { PROGRAM_IDS, DEFAULT_THRESHOLD, FINGERPRINT_BITS, MIN_CAPTURE_MS, MAX_CAPTURE_MS, DEFAULT_CAPTURE_MS } from "./config";
+export { PROGRAM_IDS, DEFAULT_THRESHOLD, DEFAULT_MIN_DISTANCE, FINGERPRINT_BITS, MIN_CAPTURE_MS, MAX_CAPTURE_MS, DEFAULT_CAPTURE_MS } from "./config";
 
 // Hashing
 export type { TemporalFingerprint, TBH, PackedFingerprint } from "./hashing/types";
@@ -18,7 +18,7 @@ export {
 
 // Feature extraction
 export type { StatsSummary, FeatureVector, FusedFeatureVector } from "./extraction/types";
-export { mean, variance, skewness, kurtosis, condense, fuseFeatures } from "./extraction/statistics";
+export { mean, variance, skewness, kurtosis, condense, entropy, autocorrelation, fuseFeatures } from "./extraction/statistics";
 
 // Proof generation
 export type { SolanaProof, CircuitInput, ProofResult } from "./proof/types";
