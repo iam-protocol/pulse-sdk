@@ -1,15 +1,15 @@
 import type { MotionSample, TouchSample } from "../sensor/types";
-import { condense } from "./statistics";
+import { condense, variance } from "./statistics";
 
 /**
  * Extract kinematic features from motion (IMU) data.
  * Computes jerk (3rd derivative) and jounce (4th derivative) of acceleration,
  * then condenses each axis into statistics.
  *
- * Returns: ~48 values (6 axes × 2 derivatives × 4 stats)
+ * Returns: ~54 values (6 axes × 2 derivatives × 4 stats + 6 jitter variance values)
  */
 export function extractMotionFeatures(samples: MotionSample[]): number[] {
-  if (samples.length < 5) return new Array(48).fill(0);
+  if (samples.length < 5) return new Array(54).fill(0);
 
   // Extract acceleration and rotation time series
   const axes = {
@@ -44,6 +44,19 @@ export function extractMotionFeatures(samples: MotionSample[]): number[] {
     );
   }
 
+  // Jitter variance per axis: variance of windowed jerk variance.
+  // Real human tremor fluctuates over time (high jitter variance).
+  // Synthetic/replay data has constant jitter (low jitter variance).
+  for (const values of Object.values(axes)) {
+    const jerk = derivative(values);
+    const windowSize = Math.max(5, Math.floor(jerk.length / 4));
+    const windowVariances: number[] = [];
+    for (let i = 0; i <= jerk.length - windowSize; i += windowSize) {
+      windowVariances.push(variance(jerk.slice(i, i + windowSize)));
+    }
+    features.push(windowVariances.length >= 2 ? variance(windowVariances) : 0);
+  }
+
   return features;
 }
 
@@ -52,10 +65,10 @@ export function extractMotionFeatures(samples: MotionSample[]): number[] {
  * Computes velocity and acceleration of touch coordinates,
  * plus pressure and area statistics.
  *
- * Returns: ~32 values
+ * Returns: ~36 values (32 base + 4 jitter variance for x, y, pressure, area)
  */
 export function extractTouchFeatures(samples: TouchSample[]): number[] {
-  if (samples.length < 5) return new Array(32).fill(0);
+  if (samples.length < 5) return new Array(36).fill(0);
 
   const x = samples.map((s) => s.x);
   const y = samples.map((s) => s.y);
@@ -87,6 +100,16 @@ export function extractTouchFeatures(samples: TouchSample[]): number[] {
   const jerkY = derivative(accY);
   features.push(...Object.values(condense(jerkX)));
   features.push(...Object.values(condense(jerkY)));
+
+  // Jitter variance for touch signals: detects synthetic smoothness
+  for (const values of [vx, vy, pressure, area]) {
+    const windowSize = Math.max(5, Math.floor(values.length / 4));
+    const windowVariances: number[] = [];
+    for (let i = 0; i <= values.length - windowSize; i += windowSize) {
+      windowVariances.push(variance(values.slice(i, i + windowSize)));
+    }
+    features.push(windowVariances.length >= 2 ? variance(windowVariances) : 0);
+  }
 
   return features;
 }

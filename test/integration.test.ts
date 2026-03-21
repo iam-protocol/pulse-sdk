@@ -29,8 +29,8 @@ describe.skipIf(!circuitArtifactsExist)(
   "integration: full crypto pipeline",
   () => {
     it("generates a valid proof from mock features end-to-end", async () => {
-      // 1. Create mock feature vector (~236 random values)
-      const features = Array.from({ length: 236 }, (_, i) =>
+      // 1. Create mock feature vector (~259 random values: 169 audio + 54 motion + 36 touch)
+      const features = Array.from({ length: 259 }, (_, i) =>
         Math.sin(i * 0.3) * Math.cos(i * 0.7)
       );
 
@@ -56,6 +56,7 @@ describe.skipIf(!circuitArtifactsExist)(
       const input = prepareCircuitInput(tbhNew, tbhPrev, 30);
       expect(input.ft_new.length).toBe(256);
       expect(input.threshold).toBe("30");
+      expect(input.min_distance).toBe("3");
 
       // 6. Generate Groth16 proof
       const { proof, publicSignals } = await generateProof(

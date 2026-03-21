@@ -1,5 +1,5 @@
 import type { AudioCapture } from "../sensor/types";
-import { condense } from "./statistics";
+import { condense, entropy } from "./statistics";
 
 // Frame parameters matching the research paper spec
 const FRAME_SIZE = 400; // 25ms at 16kHz
@@ -11,7 +11,7 @@ const NUM_MFCC = 13;
  * Computes 13 MFCCs per frame, plus delta and delta-delta coefficients,
  * then condenses each coefficient's time series into 4 statistics.
  *
- * Returns: 13 coefficients × 3 (raw + delta + delta-delta) × 4 stats = 156 values
+ * Returns: 13 coefficients × 3 (raw + delta + delta-delta) × 4 stats + 13 entropy values = 169 values
  */
 export function extractMFCC(audio: AudioCapture): number[] {
   const { samples, sampleRate } = audio;
@@ -22,12 +22,12 @@ export function extractMFCC(audio: AudioCapture): number[] {
     Meyda = require("meyda");
   } catch {
     // Meyda not available — return zeros (fallback for environments without it)
-    return new Array(NUM_MFCC * 3 * 4).fill(0);
+    return new Array(NUM_MFCC * 3 * 4 + NUM_MFCC).fill(0);
   }
 
   // Extract MFCCs per frame
   const numFrames = Math.floor((samples.length - FRAME_SIZE) / HOP_SIZE) + 1;
-  if (numFrames < 3) return new Array(NUM_MFCC * 3 * 4).fill(0);
+  if (numFrames < 3) return new Array(NUM_MFCC * 3 * 4 + NUM_MFCC).fill(0);
 
   const mfccFrames: number[][] = [];
 
@@ -76,6 +76,13 @@ export function extractMFCC(audio: AudioCapture): number[] {
     const dd = deltaDeltaFrames.map((f) => f[c] ?? 0);
     const stats = condense(dd);
     features.push(stats.mean, stats.variance, stats.skewness, stats.kurtosis);
+  }
+
+  // Entropy per MFCC coefficient: measures information density across frames.
+  // Real speech has moderate, varied entropy. Synthetic audio is too uniform or too structured.
+  for (let c = 0; c < NUM_MFCC; c++) {
+    const raw = mfccFrames.map((f) => f[c] ?? 0);
+    features.push(entropy(raw));
   }
 
   return features;

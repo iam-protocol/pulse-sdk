@@ -3,7 +3,7 @@ export { PulseSDK, PulseSession } from "./pulse";
 
 // Configuration
 export type { PulseConfig } from "./config";
-export { PROGRAM_IDS, DEFAULT_THRESHOLD, FINGERPRINT_BITS, MIN_CAPTURE_MS, MAX_CAPTURE_MS, DEFAULT_CAPTURE_MS } from "./config";
+export { PROGRAM_IDS, DEFAULT_THRESHOLD, DEFAULT_MIN_DISTANCE, FINGERPRINT_BITS, MIN_CAPTURE_MS, MAX_CAPTURE_MS, DEFAULT_CAPTURE_MS } from "./config";
 
 // Hashing
 export type { TemporalFingerprint, TBH, PackedFingerprint } from "./hashing/types";
@@ -18,7 +18,7 @@ export {
 
 // Feature extraction
 export type { StatsSummary, FeatureVector, FusedFeatureVector } from "./extraction/types";
-export { mean, variance, skewness, kurtosis, condense, fuseFeatures } from "./extraction/statistics";
+export { mean, variance, skewness, kurtosis, condense, entropy, autocorrelation, fuseFeatures } from "./extraction/statistics";
 
 // Proof generation
 export type { SolanaProof, CircuitInput, ProofResult } from "./proof/types";
@@ -38,6 +38,6 @@ export { fetchIdentityState, storeVerificationData, loadVerificationData } from 
 export type { AudioCapture, MotionSample, TouchSample, SensorData, CaptureOptions, CaptureStage, StageState } from "./sensor/types";
 
 // Challenge
-export { generatePhrase } from "./challenge/phrase";
-export { randomLissajousParams, generateLissajousPoints } from "./challenge/lissajous";
+export { generatePhrase, generatePhraseSequence } from "./challenge/phrase";
+export { randomLissajousParams, generateLissajousPoints, generateLissajousSequence } from "./challenge/lissajous";
 export type { LissajousParams, Point2D } from "./challenge/lissajous";

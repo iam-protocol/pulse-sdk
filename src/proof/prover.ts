@@ -1,7 +1,7 @@
 import type { TBH } from "../hashing/types";
 import type { CircuitInput, ProofResult, SolanaProof } from "./types";
 import { serializeProof } from "./serializer";
-import { DEFAULT_THRESHOLD } from "../config";
+import { DEFAULT_THRESHOLD, DEFAULT_MIN_DISTANCE } from "../config";
 
 // Use dynamic import for snarkjs (it's a CJS module)
 let snarkjsModule: any = null;
@@ -19,7 +19,8 @@ async function getSnarkjs(): Promise<any> {
 export function prepareCircuitInput(
   current: TBH,
   previous: TBH,
-  threshold: number = DEFAULT_THRESHOLD
+  threshold: number = DEFAULT_THRESHOLD,
+  minDistance: number = DEFAULT_MIN_DISTANCE
 ): CircuitInput {
   return {
     ft_new: current.fingerprint,
@@ -29,6 +30,7 @@ export function prepareCircuitInput(
     commitment_new: current.commitment.toString(),
     commitment_prev: previous.commitment.toString(),
     threshold: threshold.toString(),
+    min_distance: minDistance.toString(),
   };
 }
 
