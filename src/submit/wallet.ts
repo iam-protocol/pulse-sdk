@@ -14,8 +14,8 @@ export async function submitViaWallet(
   proof: SolanaProof,
   commitment: Uint8Array,
   options: {
-    wallet: any; // WalletAdapter
-    connection: any; // Connection
+    wallet: any;
+    connection: any;
     isFirstVerification: boolean;
     trustScore?: number;
   }
@@ -39,18 +39,18 @@ export async function submitViaWallet(
     // Derive PDAs
     const [challengePda] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("challenge"),
+        new TextEncoder().encode("challenge"),
         provider.wallet.publicKey.toBuffer(),
-        Buffer.from(nonce),
+        new Uint8Array(nonce),
       ],
       verifierProgramId
     );
 
     const [verificationPda] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("verification"),
+        new TextEncoder().encode("verification"),
         provider.wallet.publicKey.toBuffer(),
-        Buffer.from(nonce),
+        new Uint8Array(nonce),
       ],
       verifierProgramId
     );
@@ -83,7 +83,7 @@ export async function submitViaWallet(
     // 2. Verify proof
     const txSig = await verifierProgram.methods
       .verifyProof(
-        Buffer.from(proof.proofBytes),
+        Array.from(proof.proofBytes),
         proof.publicInputs.map((pi) => Array.from(pi)),
         nonce
       )
@@ -106,15 +106,15 @@ export async function submitViaWallet(
 
       if (options.isFirstVerification) {
         const [identityPda] = PublicKey.findProgramAddressSync(
-          [Buffer.from("identity"), provider.wallet.publicKey.toBuffer()],
+          [new TextEncoder().encode("identity"), provider.wallet.publicKey.toBuffer()],
           anchorProgramId
         );
         const [mintPda] = PublicKey.findProgramAddressSync(
-          [Buffer.from("mint"), provider.wallet.publicKey.toBuffer()],
+          [new TextEncoder().encode("mint"), provider.wallet.publicKey.toBuffer()],
           anchorProgramId
         );
         const [mintAuthority] = PublicKey.findProgramAddressSync(
-          [Buffer.from("mint_authority")],
+          [new TextEncoder().encode("mint_authority")],
           anchorProgramId
         );
 
@@ -150,7 +150,7 @@ export async function submitViaWallet(
           .rpc();
       } else {
         const [identityPda] = PublicKey.findProgramAddressSync(
-          [Buffer.from("identity"), provider.wallet.publicKey.toBuffer()],
+          [new TextEncoder().encode("identity"), provider.wallet.publicKey.toBuffer()],
           anchorProgramId
         );
 

@@ -57,8 +57,12 @@ export function condense(values: number[]): StatsSummary {
  */
 export function entropy(values: number[], bins: number = 16): number {
   if (values.length < 2) return 0;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  let min = values[0]!;
+  let max = values[0]!;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i]! < min) min = values[i]!;
+    if (values[i]! > max) max = values[i]!;
+  }
   if (min === max) return 0;
 
   const counts = new Array(bins).fill(0);
