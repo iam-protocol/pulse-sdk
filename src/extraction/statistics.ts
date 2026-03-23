@@ -100,10 +100,30 @@ export function autocorrelation(values: number[], lag: number = 1): number {
   return sum / ((values.length - lag) * v);
 }
 
+/**
+ * Normalize a feature group to zero mean and unit variance.
+ * Ensures each modality (audio, motion, touch) contributes equally
+ * to SimHash hyperplane projections regardless of raw magnitude scale.
+ */
+function normalizeGroup(features: number[]): number[] {
+  if (features.length === 0) return features;
+
+  let sum = 0;
+  for (const v of features) sum += v;
+  const mean = sum / features.length;
+
+  let sqSum = 0;
+  for (const v of features) sqSum += (v - mean) * (v - mean);
+  const std = Math.sqrt(sqSum / features.length);
+
+  if (std === 0) return features.map(() => 0);
+  return features.map((v) => (v - mean) / std);
+}
+
 export function fuseFeatures(
   audio: number[],
   motion: number[],
   touch: number[]
 ): number[] {
-  return [...audio, ...motion, ...touch];
+  return [...normalizeGroup(audio), ...normalizeGroup(motion), ...normalizeGroup(touch)];
 }
