@@ -104,7 +104,7 @@ async function processSensorData(
   // Re-verification requires audio + at least one other modality.
   // Audio-only fingerprints lack inter-session variance from motion/touch,
   // producing identical SimHash results that fail the min_distance constraint.
-  const hasPreviousData = loadVerificationData() !== null;
+  const hasPreviousData = (await loadVerificationData()) !== null;
   if (hasPreviousData && !hasMotion && !hasTouch) {
     return {
       success: false,
@@ -133,7 +133,7 @@ async function processSensorData(
   const tbh = await generateTBH(fingerprint);
 
   // Check for previous verification data
-  const previousData = loadVerificationData();
+  const previousData = await loadVerificationData();
   const isFirstVerification = !previousData;
 
   let solanaProof: SolanaProof | null = null;
@@ -229,7 +229,7 @@ async function processSensorData(
 
   // Store verification data locally for next re-verification
   if (submission.success) {
-    storeVerificationData({
+    await storeVerificationData({
       fingerprint: tbh.fingerprint,
       salt: tbh.salt.toString(),
       commitment: tbh.commitment.toString(),
