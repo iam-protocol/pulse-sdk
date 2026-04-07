@@ -82,10 +82,13 @@ export async function submitViaWallet(
       .rpc();
 
     // 2. Verify proof
+    // Anchor 0.32.1 uses buffer-layout v1.2 which requires Node.js Buffer
+    // (not Uint8Array) for Blob.encode on Vec<u8> fields.
+    const { Buffer: SolBuffer } = await import("buffer");
     const txSig = await verifierProgram.methods
       .verifyProof(
-        proof.proofBytes,
-        proof.publicInputs,
+        SolBuffer.from(proof.proofBytes),
+        proof.publicInputs.map((pi) => SolBuffer.from(pi)),
         nonce
       )
       .accounts({
