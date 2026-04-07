@@ -34,7 +34,7 @@ export const PROGRAM_IDS = {
 export const SAS_CONFIG = {
   programId: "22zoJMtdu4tQc2PzL74ZUT7FrwgB1Udec8DdW4yw4BdG",
   iamCredentialPda: "GaPTkZC6JEGds1G5h645qyUrogx7NWghR2JgjvKQwTDo",
-  iamSchemaPda: "2VHPPpLkZeTHGTf5CfEqoMAro5dZrPfC3UFqhiuKxDJC",
+  iamSchemaPda: "EPkajiGQjycPwcc3pupqExVdAmSfxWd31tRYZezd8c5g",
 } as const;
 
 export interface PulseConfig {
