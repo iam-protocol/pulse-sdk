@@ -84,8 +84,8 @@ export async function submitViaWallet(
     // 2. Verify proof
     const txSig = await verifierProgram.methods
       .verifyProof(
-        Array.from(proof.proofBytes),
-        proof.publicInputs.map((pi) => Array.from(pi)),
+        proof.proofBytes,
+        proof.publicInputs,
         nonce
       )
       .accounts({
