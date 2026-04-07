@@ -203,13 +203,15 @@ async function processSensorData(
       submission = await submitViaWallet(
         solanaProof ?? { proofBytes: new Uint8Array(0), publicInputs: [] },
         tbh.commitmentBytes,
-        { wallet, connection, isFirstVerification: true }
+        { wallet, connection, isFirstVerification: true, relayerUrl: config.relayerUrl, relayerApiKey: config.relayerApiKey }
       );
     } else {
       submission = await submitViaWallet(solanaProof!, tbh.commitmentBytes, {
         wallet,
         connection,
         isFirstVerification: false,
+        relayerUrl: config.relayerUrl,
+        relayerApiKey: config.relayerApiKey,
       });
     }
   } else if (config.relayerUrl) {
@@ -241,6 +243,7 @@ async function processSensorData(
     success: submission.success,
     commitment: tbh.commitmentBytes,
     txSignature: submission.txSignature,
+    attestationTx: submission.attestationTx,
     isFirstVerification,
     error: submission.error,
   };
