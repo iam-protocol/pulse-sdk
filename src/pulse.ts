@@ -147,6 +147,50 @@ async function processSensorData(
     `Touch[98..133]: ${features.slice(98, 134).filter((v) => v !== 0).length} non-zero.`
   );
 
+  // Server-side feature validation (if executor is configured)
+  if (config.relayerUrl && wallet) {
+    const walletPubkey = wallet.adapter?.publicKey ?? wallet.publicKey;
+    if (walletPubkey) {
+      try {
+        const baseUrl = new URL(config.relayerUrl);
+        const validateUrl = `${baseUrl.origin}/validate-features`;
+        const validateHeaders: Record<string, string> = { "Content-Type": "application/json" };
+        if (config.relayerApiKey) {
+          validateHeaders["X-API-Key"] = config.relayerApiKey;
+        }
+
+        const validateController = new AbortController();
+        const validateTimer = setTimeout(() => validateController.abort(), 10_000);
+
+        const validateResponse = await fetch(validateUrl, {
+          method: "POST",
+          headers: validateHeaders,
+          body: JSON.stringify({
+            features,
+            wallet_id: walletPubkey.toBase58(),
+          }),
+          signal: validateController.signal,
+        });
+
+        clearTimeout(validateTimer);
+
+        if (!validateResponse.ok) {
+          const errorBody = await validateResponse.json().catch(() => ({}));
+          console.warn("[IAM SDK] Feature validation rejected by server");
+          return {
+            success: false,
+            commitment: new Uint8Array(32),
+            isFirstVerification: false,
+            error: (errorBody as Record<string, string>).error || "Feature validation failed",
+          };
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[IAM SDK] Feature validation unavailable: ${msg}, proceeding without server validation`);
+      }
+    }
+  }
+
   // Generate fingerprint via SimHash
   const fingerprint = simhash(features);
 
