@@ -1,5 +1,6 @@
 import type { PulseConfig } from "./config";
 import { DEFAULT_THRESHOLD, DEFAULT_CAPTURE_MS, PROGRAM_IDS } from "./config";
+import { setDebug, sdkLog, sdkWarn } from "./log";
 import type { SensorData, AudioCapture, MotionSample, TouchSample, StageState } from "./sensor/types";
 import type { TBH } from "./hashing/types";
 import type { SolanaProof } from "./proof/types";
@@ -148,7 +149,7 @@ async function processSensorData(
 
   // Diagnostic: log feature vector composition
   const nonZero = features.filter((v) => v !== 0).length;
-  console.log(
+  sdkLog(
     `[IAM SDK] Feature vector: ${features.length} dimensions, ${nonZero} non-zero. ` +
     `Audio[0..43]: ${features.slice(0, 44).filter((v) => v !== 0).length} non-zero. ` +
     `Motion/Mouse[44..97]: ${features.slice(44, 98).filter((v) => v !== 0).length} non-zero. ` +
@@ -184,7 +185,7 @@ async function processSensorData(
 
         if (!validateResponse.ok) {
           const errorBody = await validateResponse.json().catch(() => ({}));
-          console.warn("[IAM SDK] Feature validation rejected by server");
+          sdkWarn("[IAM SDK] Feature validation rejected by server");
           return {
             success: false,
             commitment: new Uint8Array(32),
@@ -194,7 +195,7 @@ async function processSensorData(
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[IAM SDK] Feature validation unavailable: ${msg}, proceeding without server validation`);
+        sdkWarn(`[IAM SDK] Feature validation unavailable: ${msg}, proceeding without server validation`);
       }
     }
   }
@@ -257,7 +258,7 @@ async function processSensorData(
     };
 
     const distance = hammingDistance(fingerprint, previousData.fingerprint);
-    console.log(
+    sdkLog(
       `[IAM SDK] Re-verification: Hamming distance = ${distance} / 256 bits (threshold = ${config.threshold})`
     );
 
@@ -562,6 +563,7 @@ export class PulseSDK {
       threshold: DEFAULT_THRESHOLD,
       ...config,
     };
+    setDebug(config.debug ?? false);
   }
 
   /**

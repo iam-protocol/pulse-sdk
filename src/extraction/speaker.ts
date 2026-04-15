@@ -13,6 +13,7 @@
 import type { AudioCapture } from "../sensor/types";
 import { condense, entropy } from "./statistics";
 import { extractFormantRatios } from "./lpc";
+import { sdkWarn } from "../log";
 
 /**
  * Compute frame size adaptive to actual sample rate.
@@ -78,7 +79,7 @@ async function detectF0Contour(
   const numFrames = Math.floor((samples.length - frameSize) / hopSize) + 1;
 
   if (sampleRate !== 16000) {
-    console.warn(`[IAM SDK] Audio captured at ${sampleRate}Hz (requested 16kHz). Frame size adjusted to ${frameSize}.`);
+    sdkWarn(`[IAM SDK] Audio captured at ${sampleRate}Hz (requested 16kHz). Frame size adjusted to ${frameSize}.`);
   }
 
   for (let i = 0; i < numFrames; i++) {
@@ -321,7 +322,7 @@ export async function extractSpeakerFeatures(audio: AudioCapture): Promise<numbe
   const { samples, sampleRate } = audio;
 
   if (!Number.isFinite(sampleRate) || sampleRate <= 0 || samples.length === 0) {
-    console.warn("[IAM SDK] Invalid audio data. Speaker features will be zeros.");
+    sdkWarn("[IAM SDK] Invalid audio data. Speaker features will be zeros.");
     return new Array(SPEAKER_FEATURE_COUNT).fill(0);
   }
 
@@ -330,7 +331,7 @@ export async function extractSpeakerFeatures(audio: AudioCapture): Promise<numbe
 
   const numFrames = Math.floor((samples.length - frameSize) / hopSize) + 1;
   if (numFrames < 5) {
-    console.warn(`[IAM SDK] Too few audio frames (${numFrames}). Speaker features will be zeros.`);
+    sdkWarn(`[IAM SDK] Too few audio frames (${numFrames}). Speaker features will be zeros.`);
     return new Array(SPEAKER_FEATURE_COUNT).fill(0);
   }
 

@@ -1,4 +1,5 @@
 import { PROGRAM_IDS } from "../config";
+import { sdkWarn } from "../log";
 import type { IdentityState, StoredVerificationData } from "./types";
 import {
   hasCryptoSupport,
@@ -93,14 +94,14 @@ export async function fetchIdentityState(
 export async function storeVerificationData(data: StoredVerificationData): Promise<void> {
   try {
     if (!hasCryptoSupport()) {
-      console.warn("[IAM SDK] Crypto unavailable — verification data stored unencrypted");
+      sdkWarn("[IAM SDK] Crypto unavailable — verification data stored unencrypted");
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
       return;
     }
 
     const key = await getOrCreateEncryptionKey();
     if (!key) {
-      console.warn("[IAM SDK] Encryption key unavailable — storing unencrypted");
+      sdkWarn("[IAM SDK] Encryption key unavailable — storing unencrypted");
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
       return;
     }
@@ -127,12 +128,12 @@ export async function loadVerificationData(): Promise<StoredVerificationData | n
     // Encrypted envelope
     if (isEncryptedEnvelope(parsed)) {
       if (!hasCryptoSupport()) {
-        console.warn("[IAM SDK] Encrypted data found but crypto unavailable");
+        sdkWarn("[IAM SDK] Encrypted data found but crypto unavailable");
         return inMemoryStore;
       }
       const key = await getOrCreateEncryptionKey();
       if (!key) {
-        console.warn("[IAM SDK] Encryption key lost — clearing stale data");
+        sdkWarn("[IAM SDK] Encryption key lost — clearing stale data");
         localStorage.removeItem(STORAGE_KEY);
         return inMemoryStore;
       }
@@ -140,7 +141,7 @@ export async function loadVerificationData(): Promise<StoredVerificationData | n
         const plaintext = await decrypt(parsed.iv, parsed.ct, key);
         return JSON.parse(plaintext) as StoredVerificationData;
       } catch {
-        console.warn("[IAM SDK] Decryption failed — clearing corrupted data");
+        sdkWarn("[IAM SDK] Decryption failed — clearing corrupted data");
         localStorage.removeItem(STORAGE_KEY);
         return inMemoryStore;
       }
@@ -153,7 +154,7 @@ export async function loadVerificationData(): Promise<StoredVerificationData | n
     }
 
     // Unrecognized format
-    console.warn("[IAM SDK] Unrecognized verification data format — clearing");
+    sdkWarn("[IAM SDK] Unrecognized verification data format — clearing");
     localStorage.removeItem(STORAGE_KEY);
     return inMemoryStore;
   } catch {

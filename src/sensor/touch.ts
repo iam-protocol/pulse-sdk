@@ -1,5 +1,6 @@
 import type { TouchSample, CaptureOptions } from "./types";
 import { MIN_CAPTURE_MS, MAX_CAPTURE_MS } from "../config";
+import { sdkLog } from "../log";
 
 /**
  * Capture touch/pointer data (position, pressure, contact area) until signaled to stop.
@@ -38,13 +39,13 @@ export function captureTouch(
       clearTimeout(maxTimer);
       element.removeEventListener("pointermove", handler);
       element.removeEventListener("pointerdown", handler);
-      console.log(`[IAM SDK] Touch capture stopped: ${samples.length} samples collected`);
+      sdkLog(`[IAM SDK] Touch capture stopped: ${samples.length} samples collected`);
       resolve(samples);
     }
 
     element.addEventListener("pointermove", handler);
     element.addEventListener("pointerdown", handler);
-    console.log(`[IAM SDK] Touch capture started on <${element.tagName}>, listening for pointer events`);
+    sdkLog(`[IAM SDK] Touch capture started on <${element.tagName}>, listening for pointer events`);
 
     const maxTimer = setTimeout(stopCapture, maxDurationMs);
 

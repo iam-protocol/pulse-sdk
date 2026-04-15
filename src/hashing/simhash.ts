@@ -1,4 +1,5 @@
 import { FINGERPRINT_BITS, SIMHASH_SEED } from "../config";
+import { sdkWarn } from "../log";
 import type { TemporalFingerprint } from "./types";
 
 // Mulberry32 PRNG: deterministic, fast, good distribution
@@ -60,7 +61,7 @@ export function simhash(features: number[]): TemporalFingerprint {
   }
 
   if (features.length !== EXPECTED_FEATURE_DIMENSION) {
-    console.warn(
+    sdkWarn(
       `[IAM SDK] Feature vector has ${features.length} dimensions, expected ${EXPECTED_FEATURE_DIMENSION}. ` +
       `Fingerprint quality may be degraded.`
     );

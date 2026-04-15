@@ -51,4 +51,6 @@ export interface PulseConfig {
   zkeyUrl?: string;
   wasmUrl?: string;
   threshold?: number;
+  /** Enable console logging for diagnostics. Default: false. */
+  debug?: boolean;
 }
