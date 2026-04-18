@@ -37,7 +37,7 @@ import { PulseSDK } from '@iam-protocol/pulse-sdk';
 
 const pulse = new PulseSDK({
   cluster: 'devnet',
-  relayerUrl: 'https://api.iam-human.io/relay',
+  relayerUrl: 'https://api.iamprotocol.io/relay',
   wasmUrl: '/circuits/iam_hamming.wasm',
   zkeyUrl: '/circuits/iam_hamming_final.zkey',
 });
