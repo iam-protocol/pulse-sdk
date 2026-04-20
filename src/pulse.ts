@@ -102,10 +102,13 @@ async function extractFeatures(data: SensorData): Promise<ExtractedFeatures> {
  * Shared pipeline: features → simhash → TBH → proof → submit.
  * Used by both PulseSDK.verify() and PulseSession.complete().
  */
-// Minimum sample counts for meaningful feature extraction
-const MIN_AUDIO_SAMPLES = 16000; // ~1 second at 16kHz
-const MIN_MOTION_SAMPLES = 10;
-const MIN_TOUCH_SAMPLES = 10;
+// Minimum sample counts for meaningful feature extraction.
+// Exported so consumers (including the internal-build-only red team harness)
+// can enforce the same thresholds upstream and surface clearer errors than
+// the SDK's data-quality gate would.
+export const MIN_AUDIO_SAMPLES = 16000; // ~1 second at 16 kHz
+export const MIN_MOTION_SAMPLES = 10;
+export const MIN_TOUCH_SAMPLES = 10;
 
 async function processSensorData(
   sensorData: SensorData,
