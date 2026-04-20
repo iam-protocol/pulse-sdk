@@ -133,16 +133,34 @@ export async function loadVerificationData(): Promise<StoredVerificationData | n
       }
       const key = await getOrCreateEncryptionKey();
       if (!key) {
-        sdkWarn("[IAM SDK] Encryption key lost — clearing stale data");
-        localStorage.removeItem(STORAGE_KEY);
+        // Preserve the envelope. If the IndexedDB key is temporarily
+        // unavailable (transient storage issue, permission prompt denied
+        // once, etc.), a future load with a recovered key can still decrypt.
+        // Silently deleting was the previous behavior and caused permanent
+        // baseline loss for wallet-connected users whose IndexedDB got
+        // corrupted into a post-patch recoverable state (DB_VERSION bump
+        // in crypto.ts now self-heals the store, but the envelope must
+        // survive the broken window to benefit).
+        sdkWarn(
+          "[IAM SDK] Encryption key unavailable — keeping envelope for recovery. " +
+            "If this persists across reloads, check IndexedDB state via DevTools."
+        );
         return inMemoryStore;
       }
       try {
         const plaintext = await decrypt(parsed.iv, parsed.ct, key);
         return JSON.parse(plaintext) as StoredVerificationData;
       } catch {
-        sdkWarn("[IAM SDK] Decryption failed — clearing corrupted data");
-        localStorage.removeItem(STORAGE_KEY);
+        // Same rationale as above: decrypt failure is often transient
+        // (IndexedDB hiccup, key re-derivation edge case). Preserve the
+        // envelope so the next successful decrypt can recover the data.
+        // If the data truly cannot be decrypted by this device, a user-
+        // triggered baseline reset (or manual "Clear site data") is the
+        // right path — not a silent delete on the SDK's initiative.
+        sdkWarn(
+          "[IAM SDK] Decryption failed — keeping envelope for recovery. " +
+            "Trigger a baseline reset or Clear site data if this is persistent."
+        );
         return inMemoryStore;
       }
     }
