@@ -80,6 +80,10 @@ export async function fetchIdentityState(
       trustScore: decoded.trustScore,
       currentCommitment: new Uint8Array(decoded.currentCommitment),
       mint: decoded.mint.toBase58(),
+      // Anchor's Borsh coder returns the raw BN for i64 fields; .toNumber()
+      // is safe here because Unix timestamps fit in Number.MAX_SAFE_INTEGER
+      // until year 275760.
+      lastResetTimestamp: decoded.lastResetTimestamp?.toNumber?.() ?? 0,
     };
   } catch {
     return null;

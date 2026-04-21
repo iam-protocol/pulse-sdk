@@ -30,7 +30,10 @@ export { generateProof, generateSolanaProof, prepareCircuitInput } from "./proof
 
 // Submission
 export type { SubmissionResult, VerificationResult } from "./submit/types";
-export { submitViaWallet } from "./submit/wallet";
+// `submitResetViaWallet` is exported for advanced integrators building
+// their own reset UX. Most consumers should use `PulseSDK.resetBaseline()`
+// or `PulseSession.completeReset()` which handle capture + validation.
+export { submitViaWallet, submitResetViaWallet } from "./submit/wallet";
 export { submitViaRelayer } from "./submit/relayer";
 
 // Attestation (SAS)
