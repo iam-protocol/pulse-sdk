@@ -8,6 +8,7 @@ import type { VerificationResult } from "./submit/types";
 import type { StoredVerificationData } from "./identity/types";
 
 import { captureAudio } from "./sensor/audio";
+import { encodeAudioAsBase64 } from "./sensor/encode";
 import { captureMotion, requestMotionPermission } from "./sensor/motion";
 import { captureTouch } from "./sensor/touch";
 import { extractSpeakerFeaturesDetailed, SPEAKER_FEATURE_COUNT } from "./extraction/speaker";
@@ -157,8 +158,29 @@ async function extractFingerprintAndValidate(
         validateHeaders["X-API-Key"] = config.relayerApiKey;
       }
 
+      // Encode captured audio for server-side phrase content binding
+      // (master-list #89). Validation runs Whisper-tiny on the samples and
+      // phoneme-matches against the server-issued challenge phrase (which
+      // the executor looks up server-side via the wallet-keyed nonce
+      // registry). If audio is absent, the validation service skips the
+      // phrase check — preserving backward compatibility for older SDKs.
+      //
+      // We also transmit the actual `sampleRate` from the capture — browsers
+      // occasionally ignore the 16kHz AudioContext request (Safari with
+      // Bluetooth codec negotiation, some Android devices) and deliver 44.1k
+      // or 48k. The validator resamples to 16kHz internally before feeding
+      // Whisper, so transmitting the true rate avoids silent transcription
+      // quality loss.
+      const audioSamplesB64 = sensorData.audio?.samples
+        ? encodeAudioAsBase64(sensorData.audio.samples)
+        : undefined;
+      const audioSampleRateHz = sensorData.audio?.sampleRate;
+
+      // Whisper-tiny inference adds ~1s to the validation round trip.
+      // Extend timeout from 10s to 15s to tolerate cold-start model load
+      // without aborting on legitimate requests.
       const validateController = new AbortController();
-      const validateTimer = setTimeout(() => validateController.abort(), 10_000);
+      const validateTimer = setTimeout(() => validateController.abort(), 15_000);
 
       const validateResponse = await fetch(validateUrl, {
         method: "POST",
@@ -168,6 +190,8 @@ async function extractFingerprintAndValidate(
           f0_contour: f0Contour,
           accel_magnitude: accelMagnitude,
           wallet_id: walletAddress,
+          audio_samples_b64: audioSamplesB64,
+          audio_sample_rate_hz: audioSampleRateHz,
         }),
         signal: validateController.signal,
       });

@@ -55,3 +55,9 @@ export type { AudioCapture, MotionSample, TouchSample, SensorData, CaptureOption
 export { generatePhrase, generatePhraseSequence } from "./challenge/phrase";
 export { randomLissajousParams, generateLissajousPoints, generateLissajousSequence } from "./challenge/lissajous";
 export type { LissajousParams, Point2D } from "./challenge/lissajous";
+export { fetchChallenge } from "./challenge/fetch";
+export type { ChallengeResponse } from "./challenge/fetch";
+
+// Audio encoding helper (transmits captured PCM to the validation service
+// for phrase content binding; master-list #89).
+export { encodeAudioAsBase64 } from "./sensor/encode";
