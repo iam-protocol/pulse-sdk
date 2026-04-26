@@ -852,6 +852,7 @@ export class PulseSession {
   async __validateOnly(walletAddress: string): Promise<{
     validated: boolean;
     error?: string;
+    reason?: string;
   }> {
     if (typeof __IAM_INTERNAL_TEST__ !== "boolean" || !__IAM_INTERNAL_TEST__) {
       throw new Error(
@@ -901,7 +902,7 @@ export class PulseSession {
     );
 
     if (!extraction.ok) {
-      return { validated: false, error: extraction.error };
+      return { validated: false, error: extraction.error, reason: extraction.reason };
     }
     return { validated: true };
   }
