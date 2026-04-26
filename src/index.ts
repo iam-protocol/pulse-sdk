@@ -30,12 +30,15 @@ export { generateProof, generateSolanaProof, prepareCircuitInput } from "./proof
 
 // Submission
 export type { SubmissionResult, VerificationResult } from "./submit/types";
-export { submitViaWallet } from "./submit/wallet";
+// `submitResetViaWallet` is exported for advanced integrators building
+// their own reset UX. Most consumers should use `PulseSDK.resetBaseline()`
+// or `PulseSession.completeReset()` which handle capture + validation.
+export { submitViaWallet, submitResetViaWallet } from "./submit/wallet";
 export { submitViaRelayer } from "./submit/relayer";
 
 // Attestation (SAS)
-export type { IAMAttestation } from "./attestation/sas";
-export { verifyIAMAttestation } from "./attestation/sas";
+export type { EntrosAttestation } from "./attestation/sas";
+export { verifyEntrosAttestation } from "./attestation/sas";
 
 // Agent Anchor (Solana Agent Registry)
 export type { AgentHumanOperator } from "./agent/anchor";
@@ -52,3 +55,9 @@ export type { AudioCapture, MotionSample, TouchSample, SensorData, CaptureOption
 export { generatePhrase, generatePhraseSequence } from "./challenge/phrase";
 export { randomLissajousParams, generateLissajousPoints, generateLissajousSequence } from "./challenge/lissajous";
 export type { LissajousParams, Point2D } from "./challenge/lissajous";
+export { fetchChallenge } from "./challenge/fetch";
+export type { ChallengeResponse } from "./challenge/fetch";
+
+// Audio encoding helper (transmits captured PCM to the validation service
+// for phrase content binding; master-list #89).
+export { encodeAudioAsBase64 } from "./sensor/encode";

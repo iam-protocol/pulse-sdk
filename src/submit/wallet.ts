@@ -6,6 +6,79 @@ import { PROGRAM_IDS } from "../config";
 import { sdkLog, sdkWarn } from "../log";
 
 /**
+ * Best-effort SAS attestation request. POSTs to the executor's `/attest`
+ * endpoint with the wallet's public key, an optional server-issued challenge
+ * nonce, and an `Entros-ATTEST:{wallet}:{timestamp}` ownership signature.
+ *
+ * Returns the attestation tx signature on success, `undefined` on any
+ * failure (attestation is non-fatal — the on-chain tx has already confirmed
+ * by the time this is called).
+ */
+async function requestSasAttestation(
+  wallet: any,
+  walletAddress: string,
+  relayerUrl: string,
+  relayerApiKey: string | undefined,
+  serverNonce: number[] | undefined,
+): Promise<string | undefined> {
+  try {
+    const attestHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (relayerApiKey) {
+      attestHeaders["X-API-Key"] = relayerApiKey;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+
+    const baseUrl = new URL(relayerUrl);
+    const attestUrl = `${baseUrl.origin}/attest`;
+
+    const attestBody: Record<string, unknown> = { wallet_address: walletAddress };
+    if (serverNonce) attestBody.nonce = serverNonce;
+
+    if (wallet?.signMessage) {
+      try {
+        const timestamp = Math.floor(Date.now() / 1000);
+        const attestMessage = `Entros-ATTEST:${walletAddress}:${timestamp}`;
+        const messageBytes = new TextEncoder().encode(attestMessage);
+        const sigBytes: Uint8Array = await wallet.signMessage(messageBytes);
+        const sigHex = Array.from(sigBytes)
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+        attestBody.signature = sigHex;
+        attestBody.message = attestMessage;
+      } catch {
+        sdkWarn("Wallet signMessage failed, skipping ownership proof");
+      }
+    }
+
+    const attestRes = await fetch(attestUrl, {
+      method: "POST",
+      headers: attestHeaders,
+      body: JSON.stringify(attestBody),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (attestRes.ok) {
+      const attestData = (await attestRes.json()) as {
+        success?: boolean;
+        attestation_tx?: string;
+      };
+      if (attestData.success && attestData.attestation_tx) {
+        return attestData.attestation_tx;
+      }
+    }
+  } catch {
+    // Attestation is best-effort; on-chain tx already confirmed.
+  }
+  return undefined;
+}
+
+/**
  * Submit a proof on-chain via a connected wallet (wallet-connected mode).
  * Uses Anchor SDK to construct and send the transaction.
  *
@@ -35,7 +108,7 @@ export async function submitViaWallet(
       { commitment: "confirmed" }
     );
 
-    const anchorProgramId = new PublicKey(PROGRAM_IDS.iamAnchor);
+    const anchorProgramId = new PublicKey(PROGRAM_IDS.entrosAnchor);
 
     let txSig: string | undefined;
     let serverNonce = false;
@@ -44,7 +117,7 @@ export async function submitViaWallet(
     if (!options.isFirstVerification) {
       // Re-verification: batch create_challenge + verify_proof + update_anchor
       // into a single transaction (1 wallet prompt instead of 3)
-      const verifierProgramId = new PublicKey(PROGRAM_IDS.iamVerifier);
+      const verifierProgramId = new PublicKey(PROGRAM_IDS.entrosVerifier);
 
       // Fetch server-generated nonce (prevents pre-computation attacks).
       // Falls back to client-generated nonce if executor is unreachable.
@@ -107,7 +180,7 @@ export async function submitViaWallet(
         anchorProgramId
       );
 
-      const registryProgramId = new PublicKey(PROGRAM_IDS.iamRegistry);
+      const registryProgramId = new PublicKey(PROGRAM_IDS.entrosRegistry);
       const [protocolConfigPda] = PublicKey.findProgramAddressSync(
         [new TextEncoder().encode("protocol_config")],
         registryProgramId
@@ -125,13 +198,13 @@ export async function submitViaWallet(
       if (!verifierIdl) {
         return {
           success: false,
-          error: `Failed to fetch iam-verifier IDL from Solana (program ${PROGRAM_IDS.iamVerifier}). Check your RPC endpoint is reachable and on the correct cluster.`,
+          error: `Failed to fetch entros-verifier IDL from Solana (program ${PROGRAM_IDS.entrosVerifier}). Check your RPC endpoint is reachable and on the correct cluster.`,
         };
       }
       if (!anchorIdl) {
         return {
           success: false,
-          error: `Failed to fetch iam-anchor IDL from Solana (program ${PROGRAM_IDS.iamAnchor}). Check your RPC endpoint is reachable and on the correct cluster.`,
+          error: `Failed to fetch entros-anchor IDL from Solana (program ${PROGRAM_IDS.entrosAnchor}). Check your RPC endpoint is reachable and on the correct cluster.`,
         };
       }
 
@@ -165,11 +238,16 @@ export async function submitViaWallet(
         })
         .instruction();
 
+      // updateAnchor post-2026-04-20 binding patch takes the verification
+      // nonce as a second arg and requires the VerificationResult PDA as an
+      // account. Without these, the instruction would accept any commitment
+      // with no biometric proof — see protocol-core AUDIT.md for details.
       const updateAnchorIx = await anchorProgram.methods
-        .updateAnchor(Array.from(commitment))
+        .updateAnchor(Array.from(commitment), nonce)
         .accounts({
           authority: provider.wallet.publicKey,
           identityState: identityPda,
+          verificationResult: verificationPda,
           protocolConfig: protocolConfigPda,
           treasury: treasuryPda,
           systemProgram: SystemProgram.programId,
@@ -199,7 +277,7 @@ export async function submitViaWallet(
       if (!anchorIdl) {
         return {
           success: false,
-          error: `Failed to fetch iam-anchor IDL from Solana (program ${PROGRAM_IDS.iamAnchor}). Check your RPC endpoint is reachable and on the correct cluster.`,
+          error: `Failed to fetch entros-anchor IDL from Solana (program ${PROGRAM_IDS.entrosAnchor}). Check your RPC endpoint is reachable and on the correct cluster.`,
         };
       }
 
@@ -218,7 +296,7 @@ export async function submitViaWallet(
         anchorProgramId
       );
 
-      const registryProgramId = new PublicKey(PROGRAM_IDS.iamRegistry);
+      const registryProgramId = new PublicKey(PROGRAM_IDS.entrosRegistry);
       const [protocolConfigPda] = PublicKey.findProgramAddressSync(
         [new TextEncoder().encode("protocol_config")],
         registryProgramId
@@ -259,74 +337,124 @@ export async function submitViaWallet(
         .rpc();
     }
 
-    // Request SAS attestation from executor (best-effort, non-fatal)
-    let attestationTx: string | undefined;
-    if (options.relayerUrl) {
-      try {
-        const attestHeaders: Record<string, string> = {
-          "Content-Type": "application/json",
-        };
-        if (options.relayerApiKey) {
-          attestHeaders["X-API-Key"] = options.relayerApiKey;
-        }
+    const attestationTx = options.relayerUrl
+      ? await requestSasAttestation(
+          options.wallet,
+          provider.wallet.publicKey.toBase58(),
+          options.relayerUrl,
+          options.relayerApiKey,
+          serverNonce ? nonce : undefined,
+        )
+      : undefined;
 
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 15_000);
+    return { success: true, txSignature: txSig, attestationTx };
+  } catch (err: any) {
+    return { success: false, error: err.message ?? String(err) };
+  }
+}
 
-        // Derive base URL from relayerUrl (which may include a path like /verify)
-        const baseUrl = new URL(options.relayerUrl);
-        const attestUrl = `${baseUrl.origin}/attest`;
+/**
+ * Submit a baseline reset on-chain via a connected wallet.
+ *
+ * Fires when the on-chain IdentityState exists for the wallet but the
+ * device's local encrypted fingerprint envelope is unrecoverable. The
+ * ZK Hamming proof used by `update_anchor` needs the previous
+ * fingerprint's bits as a private witness; without them, re-verification
+ * is blocked. `reset_identity_state` rotates `current_commitment`
+ * in place, zeroes verification_count / trust_score / recent_timestamps,
+ * and sets a 7-day cooldown before the next reset.
+ *
+ * Transaction shape: single instruction (no challenge / verify_proof /
+ * ZK proof required). Humanness evidence comes from the Tier 1
+ * validation pipeline invoked at the /attest step (same as mint and
+ * update).
+ */
+export async function submitResetViaWallet(
+  commitment: Uint8Array,
+  options: {
+    wallet: any;
+    connection: any;
+    relayerUrl?: string;
+    relayerApiKey?: string;
+  }
+): Promise<SubmissionResult> {
+  try {
+    const anchor = await import("@coral-xyz/anchor");
+    const { PublicKey, SystemProgram, Transaction, ComputeBudgetProgram } =
+      await import("@solana/web3.js");
 
-        // Build attestation request body with optional nonce and ownership proof
-        const attestBody: Record<string, unknown> = {
-          wallet_address: provider.wallet.publicKey.toBase58(),
-        };
+    const provider = new anchor.AnchorProvider(
+      options.connection,
+      options.wallet,
+      { commitment: "confirmed" }
+    );
 
-        // Include server-issued nonce if available
-        if (serverNonce) {
-          attestBody.nonce = nonce;
-        }
+    const anchorProgramId = new PublicKey(PROGRAM_IDS.entrosAnchor);
+    const registryProgramId = new PublicKey(PROGRAM_IDS.entrosRegistry);
 
-        // Sign attestation message to prove wallet ownership (best-effort)
-        if (options.wallet.signMessage) {
-          try {
-            const timestamp = Math.floor(Date.now() / 1000);
-            const attestMessage = `IAM-ATTEST:${provider.wallet.publicKey.toBase58()}:${timestamp}`;
-            const messageBytes = new TextEncoder().encode(attestMessage);
-            const sigBytes: Uint8Array = await options.wallet.signMessage(messageBytes);
-            // Encode signature as hex (unambiguous, no base58 edge cases)
-            const sigHex = Array.from(sigBytes)
-              .map((b) => b.toString(16).padStart(2, "0"))
-              .join("");
-            attestBody.signature = sigHex;
-            attestBody.message = attestMessage;
-          } catch {
-            sdkWarn("Wallet signMessage failed, skipping ownership proof");
-          }
-        }
+    const [identityPda] = PublicKey.findProgramAddressSync(
+      [new TextEncoder().encode("identity"), provider.wallet.publicKey.toBuffer()],
+      anchorProgramId
+    );
+    const [protocolConfigPda] = PublicKey.findProgramAddressSync(
+      [new TextEncoder().encode("protocol_config")],
+      registryProgramId
+    );
+    const [treasuryPda] = PublicKey.findProgramAddressSync(
+      [new TextEncoder().encode("protocol_treasury")],
+      registryProgramId
+    );
 
-        const attestRes = await fetch(attestUrl, {
-          method: "POST",
-          headers: attestHeaders,
-          body: JSON.stringify(attestBody),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timer);
-
-        if (attestRes.ok) {
-          const attestData = (await attestRes.json()) as {
-            success?: boolean;
-            attestation_tx?: string;
-          };
-          if (attestData.success && attestData.attestation_tx) {
-            attestationTx = attestData.attestation_tx;
-          }
-        }
-      } catch {
-        // Attestation is best-effort; verification already succeeded
-      }
+    const anchorIdl = await anchor.Program.fetchIdl(anchorProgramId, provider);
+    if (!anchorIdl) {
+      return {
+        success: false,
+        error: `Failed to fetch entros-anchor IDL from Solana (program ${PROGRAM_IDS.entrosAnchor}). Check your RPC endpoint is reachable and on the correct cluster.`,
+      };
     }
+    const anchorProgram: any = new anchor.Program(anchorIdl, provider);
+
+    const resetIx = await anchorProgram.methods
+      .resetIdentityState(Array.from(commitment))
+      .accounts({
+        authority: provider.wallet.publicKey,
+        identityState: identityPda,
+        protocolConfig: protocolConfigPda,
+        treasury: treasuryPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+
+    // Reset does no ZK verification; budget is well under the 200K default.
+    // Keep an explicit limit for determinism and to match batched-tx ergonomics.
+    const tx = new Transaction();
+    tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 150_000 }));
+    tx.add(resetIx);
+
+    tx.feePayer = provider.wallet.publicKey;
+    tx.recentBlockhash = (
+      await options.connection.getLatestBlockhash("confirmed")
+    ).blockhash;
+
+    const txSig: string = await options.wallet.sendTransaction(
+      tx,
+      options.connection,
+      { skipPreflight: true }
+    );
+    await options.connection.confirmTransaction(txSig, "confirmed");
+
+    // Request a fresh SAS attestation. The executor's /attest handler
+    // closes any prior attestation for this wallet and creates a new one
+    // bound to the current commitment.
+    const attestationTx = options.relayerUrl
+      ? await requestSasAttestation(
+          options.wallet,
+          provider.wallet.publicKey.toBase58(),
+          options.relayerUrl,
+          options.relayerApiKey,
+          undefined,
+        )
+      : undefined;
 
     return { success: true, txSignature: txSig, attestationTx };
   } catch (err: any) {

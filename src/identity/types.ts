@@ -7,6 +7,12 @@ export interface IdentityState {
   trustScore: number;
   currentCommitment: Uint8Array;
   mint: string;
+  /**
+   * Unix timestamp of the most recent `reset_identity_state` call.
+   * Zero for accounts that have never been reset (freshly minted or
+   * minted before the reset feature was deployed).
+   */
+  lastResetTimestamp: number;
 }
 
 /** Local storage of previous verification data (needed for re-verification) */

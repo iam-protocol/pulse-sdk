@@ -8,6 +8,7 @@ import type { VerificationResult } from "./submit/types";
 import type { StoredVerificationData } from "./identity/types";
 
 import { captureAudio } from "./sensor/audio";
+import { encodeAudioAsBase64 } from "./sensor/encode";
 import { captureMotion, requestMotionPermission } from "./sensor/motion";
 import { captureTouch } from "./sensor/touch";
 import { extractSpeakerFeaturesDetailed, SPEAKER_FEATURE_COUNT } from "./extraction/speaker";
@@ -22,7 +23,7 @@ import { simhash, hammingDistance } from "./hashing/simhash";
 import { generateTBH, bigintToBytes32 } from "./hashing/poseidon";
 import { prepareCircuitInput, generateProof } from "./proof/prover";
 import { serializeProof } from "./proof/serializer";
-import { submitViaWallet } from "./submit/wallet";
+import { submitViaWallet, submitResetViaWallet } from "./submit/wallet";
 import { submitViaRelayer } from "./submit/relayer";
 import {
   storeVerificationData,
@@ -110,6 +111,122 @@ export const MIN_AUDIO_SAMPLES = 16000; // ~1 second at 16 kHz
 export const MIN_MOTION_SAMPLES = 10;
 export const MIN_TOUCH_SAMPLES = 10;
 
+type ExtractionResult =
+  | {
+      ok: true;
+      features: number[];
+      f0Contour: number[];
+      accelMagnitude: number[];
+      fingerprint: number[];
+      tbh: TBH;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Shared front half of the verification pipeline, covering feature
+ * extraction, server-side feature validation (if configured), and
+ * TBH (Poseidon commitment) generation. Used by both the normal
+ * verify path and the reset path — the back half diverges after this
+ * point (proof generation + update_anchor for verify, direct
+ * reset_identity_state for reset).
+ *
+ * `walletAddress` is the base58-encoded public key sent to the
+ * validator's `/validate-features` endpoint as `wallet_id`. Pass
+ * `undefined` for walletless mode to skip server validation.
+ */
+async function extractFingerprintAndValidate(
+  sensorData: SensorData,
+  config: ResolvedConfig,
+  walletAddress: string | undefined,
+  onProgress?: (stage: string) => void,
+): Promise<ExtractionResult> {
+  onProgress?.("Extracting features...");
+  const {
+    raw: features,
+    normalized: normalizedFeatures,
+    f0Contour,
+    accelMagnitude,
+  } = await extractFeatures(sensorData);
+
+  // Diagnostic: log feature vector composition
+  const nonZero = features.filter((v) => v !== 0).length;
+  sdkLog(
+    `[Entros SDK] Feature vector: ${features.length} dimensions, ${nonZero} non-zero. ` +
+    `Audio[0..43]: ${features.slice(0, 44).filter((v) => v !== 0).length} non-zero. ` +
+    `Motion/Mouse[44..97]: ${features.slice(44, 98).filter((v) => v !== 0).length} non-zero. ` +
+    `Touch[98..133]: ${features.slice(98, 134).filter((v) => v !== 0).length} non-zero.`
+  );
+
+  onProgress?.("Validating...");
+  if (config.relayerUrl && walletAddress) {
+    try {
+      const baseUrl = new URL(config.relayerUrl);
+      const validateUrl = `${baseUrl.origin}/validate-features`;
+      const validateHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (config.relayerApiKey) {
+        validateHeaders["X-API-Key"] = config.relayerApiKey;
+      }
+
+      // Encode captured audio for server-side phrase content binding
+      // (master-list #89). Validation runs Whisper-tiny on the samples and
+      // phoneme-matches against the server-issued challenge phrase (which
+      // the executor looks up server-side via the wallet-keyed nonce
+      // registry). If audio is absent, the validation service skips the
+      // phrase check — preserving backward compatibility for older SDKs.
+      //
+      // We also transmit the actual `sampleRate` from the capture — browsers
+      // occasionally ignore the 16kHz AudioContext request (Safari with
+      // Bluetooth codec negotiation, some Android devices) and deliver 44.1k
+      // or 48k. The validator resamples to 16kHz internally before feeding
+      // Whisper, so transmitting the true rate avoids silent transcription
+      // quality loss.
+      const audioSamplesB64 = sensorData.audio?.samples
+        ? encodeAudioAsBase64(sensorData.audio.samples)
+        : undefined;
+      const audioSampleRateHz = sensorData.audio?.sampleRate;
+
+      // Whisper-tiny inference adds ~1s to the validation round trip.
+      // Extend timeout from 10s to 15s to tolerate cold-start model load
+      // without aborting on legitimate requests.
+      const validateController = new AbortController();
+      const validateTimer = setTimeout(() => validateController.abort(), 15_000);
+
+      const validateResponse = await fetch(validateUrl, {
+        method: "POST",
+        headers: validateHeaders,
+        body: JSON.stringify({
+          features,
+          f0_contour: f0Contour,
+          accel_magnitude: accelMagnitude,
+          wallet_id: walletAddress,
+          audio_samples_b64: audioSamplesB64,
+          audio_sample_rate_hz: audioSampleRateHz,
+        }),
+        signal: validateController.signal,
+      });
+
+      clearTimeout(validateTimer);
+
+      if (!validateResponse.ok) {
+        const errorBody = await validateResponse.json().catch(() => ({}));
+        sdkWarn("[Entros SDK] Feature validation rejected by server");
+        return {
+          ok: false,
+          error: (errorBody as Record<string, string>).error || "Feature validation failed",
+        };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sdkWarn(`[Entros SDK] Feature validation unavailable: ${msg}, proceeding without server validation`);
+    }
+  }
+
+  const fingerprint = simhash(normalizedFeatures);
+  const tbh = await generateTBH(fingerprint);
+
+  return { ok: true, features, f0Contour, accelMagnitude, fingerprint, tbh };
+}
+
 async function processSensorData(
   sensorData: SensorData,
   config: ResolvedConfig,
@@ -155,7 +272,7 @@ async function processSensorData(
     if (walletPubkey) {
       try {
         const { PublicKey } = await import("@solana/web3.js");
-        const programId = new PublicKey(PROGRAM_IDS.iamAnchor);
+        const programId = new PublicKey(PROGRAM_IDS.entrosAnchor);
         const [identityPda] = PublicKey.findProgramAddressSync(
           [new TextEncoder().encode("identity"), walletPubkey.toBuffer()],
           programId
@@ -180,77 +297,23 @@ async function processSensorData(
     };
   }
 
-  // Extract features: raw (physical units) for validation, normalized (z-scored) for SimHash.
-  // f0Contour + accelMagnitude time-series are sent alongside for Tier 2 cross-modal analysis.
-  onProgress?.("Extracting features...");
-  const {
-    raw: features,
-    normalized: normalizedFeatures,
-    f0Contour,
-    accelMagnitude,
-  } = await extractFeatures(sensorData);
-
-  // Diagnostic: log feature vector composition
-  const nonZero = features.filter((v) => v !== 0).length;
-  sdkLog(
-    `[IAM SDK] Feature vector: ${features.length} dimensions, ${nonZero} non-zero. ` +
-    `Audio[0..43]: ${features.slice(0, 44).filter((v) => v !== 0).length} non-zero. ` +
-    `Motion/Mouse[44..97]: ${features.slice(44, 98).filter((v) => v !== 0).length} non-zero. ` +
-    `Touch[98..133]: ${features.slice(98, 134).filter((v) => v !== 0).length} non-zero.`
+  const walletAddress = wallet?.adapter?.publicKey?.toBase58?.()
+    ?? wallet?.publicKey?.toBase58?.();
+  const extraction = await extractFingerprintAndValidate(
+    sensorData,
+    config,
+    walletAddress,
+    onProgress,
   );
-
-  // Server-side feature validation (if executor is configured)
-  onProgress?.("Validating...");
-  if (config.relayerUrl && wallet) {
-    const walletPubkey = wallet.adapter?.publicKey ?? wallet.publicKey;
-    if (walletPubkey) {
-      try {
-        const baseUrl = new URL(config.relayerUrl);
-        const validateUrl = `${baseUrl.origin}/validate-features`;
-        const validateHeaders: Record<string, string> = { "Content-Type": "application/json" };
-        if (config.relayerApiKey) {
-          validateHeaders["X-API-Key"] = config.relayerApiKey;
-        }
-
-        const validateController = new AbortController();
-        const validateTimer = setTimeout(() => validateController.abort(), 10_000);
-
-        const validateResponse = await fetch(validateUrl, {
-          method: "POST",
-          headers: validateHeaders,
-          body: JSON.stringify({
-            features,
-            f0_contour: f0Contour,
-            accel_magnitude: accelMagnitude,
-            wallet_id: walletPubkey.toBase58(),
-          }),
-          signal: validateController.signal,
-        });
-
-        clearTimeout(validateTimer);
-
-        if (!validateResponse.ok) {
-          const errorBody = await validateResponse.json().catch(() => ({}));
-          sdkWarn("[IAM SDK] Feature validation rejected by server");
-          return {
-            success: false,
-            commitment: new Uint8Array(32),
-            isFirstVerification: false,
-            error: (errorBody as Record<string, string>).error || "Feature validation failed",
-          };
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        sdkWarn(`[IAM SDK] Feature validation unavailable: ${msg}, proceeding without server validation`);
-      }
-    }
+  if (!extraction.ok) {
+    return {
+      success: false,
+      commitment: new Uint8Array(32),
+      isFirstVerification: false,
+      error: extraction.error,
+    };
   }
-
-  // Generate fingerprint via SimHash (uses normalized features)
-  const fingerprint = simhash(normalizedFeatures);
-
-  // Generate TBH (Poseidon commitment)
-  const tbh = await generateTBH(fingerprint);
+  const { fingerprint, tbh, features } = extraction;
 
   // Determine if this is a first verification.
   // Wallet-connected: check on-chain IdentityState PDA (source of truth).
@@ -264,7 +327,7 @@ async function processSensorData(
       // Check if IdentityState PDA exists on-chain (simple existence check, no IDL needed)
       try {
         const { PublicKey } = await import("@solana/web3.js");
-        const programId = new PublicKey(PROGRAM_IDS.iamAnchor);
+        const programId = new PublicKey(PROGRAM_IDS.entrosAnchor);
         const [identityPda] = PublicKey.findProgramAddressSync(
           [new TextEncoder().encode("identity"), walletPubkey.toBuffer()],
           programId
@@ -289,7 +352,7 @@ async function processSensorData(
       success: false,
       commitment: tbh.commitmentBytes,
       isFirstVerification: false,
-      error: "Previous behavioral fingerprint not found on this device. Your IAM Anchor exists on-chain but the local baseline data is missing. Please verify from the original device, or contact the integrator for a baseline reset.",
+      error: "Previous behavioral fingerprint not found on this device. Your Entros Anchor exists on-chain but the local baseline is missing. Reset your baseline to re-enroll from this device, or verify from the device that has the original baseline.",
     };
   }
 
@@ -306,7 +369,7 @@ async function processSensorData(
 
     const distance = hammingDistance(fingerprint, previousData.fingerprint);
     sdkLog(
-      `[IAM SDK] Re-verification: Hamming distance = ${distance} / 256 bits (threshold = ${config.threshold})`
+      `[Entros SDK] Re-verification: Hamming distance = ${distance} / 256 bits (threshold = ${config.threshold})`
     );
 
     const circuitInput = prepareCircuitInput(
@@ -323,7 +386,7 @@ async function processSensorData(
         success: false,
         commitment: tbh.commitmentBytes,
         isFirstVerification: false,
-        error: "Re-verification requires wasmUrl and zkeyUrl in PulseConfig. Host the iam_hamming.wasm and iam_hamming_final.zkey circuit artifacts at public URLs.",
+        error: "Re-verification requires wasmUrl and zkeyUrl in PulseConfig. Host the entros_hamming.wasm and entros_hamming_final.zkey circuit artifacts at public URLs.",
       };
     }
 
@@ -404,6 +467,130 @@ async function processSensorData(
     txSignature: submission.txSignature,
     attestationTx: submission.attestationTx,
     isFirstVerification,
+    error: submission.error,
+  };
+}
+
+/**
+ * Reset pipeline: features → simhash → TBH → reset_identity_state → store.
+ * Mirrors `processSensorData()` but skips the Hamming ZK proof (there is no
+ * prior fingerprint to bind against) and substitutes `submitResetViaWallet`
+ * for the wallet submission path.
+ *
+ * Humanness is enforced server-side: the /validate-features and /attest
+ * endpoints on the executor reject synthetic captures identically to the
+ * normal verify flow.
+ */
+async function processResetSensorData(
+  sensorData: SensorData,
+  config: ResolvedConfig,
+  wallet: any,
+  connection: any,
+  onProgress?: (stage: string) => void,
+): Promise<VerificationResult> {
+  const audioSamples = sensorData.audio?.samples.length ?? 0;
+  const motionSamples = sensorData.motion.length;
+  const touchSamples = sensorData.touch.length;
+
+  const hasAudio = audioSamples >= MIN_AUDIO_SAMPLES;
+  const hasMotion = motionSamples >= MIN_MOTION_SAMPLES;
+  const hasTouch = touchSamples >= MIN_TOUCH_SAMPLES;
+
+  if (!hasAudio && !hasMotion && !hasTouch) {
+    return {
+      success: false,
+      commitment: new Uint8Array(32),
+      isFirstVerification: true,
+      error: "Insufficient behavioral data. Please speak the phrase and trace the curve during capture.",
+    };
+  }
+
+  if (!hasAudio) {
+    return {
+      success: false,
+      commitment: new Uint8Array(32),
+      isFirstVerification: true,
+      error: "No voice data detected. Please speak the phrase clearly during capture.",
+    };
+  }
+
+  // Reset requires the full multi-modal capture just like a fresh mint, so
+  // the on-chain baseline is established from a meaningful fingerprint.
+  if (!hasMotion && !hasTouch) {
+    return {
+      success: false,
+      commitment: new Uint8Array(32),
+      isFirstVerification: true,
+      error: "Insufficient sensor data for baseline reset. Please trace the curve and allow motion access.",
+    };
+  }
+
+  const walletAddress = wallet.adapter?.publicKey?.toBase58?.()
+    ?? wallet.publicKey?.toBase58?.();
+  const extraction = await extractFingerprintAndValidate(
+    sensorData,
+    config,
+    walletAddress,
+    onProgress,
+  );
+  if (!extraction.ok) {
+    return {
+      success: false,
+      commitment: new Uint8Array(32),
+      isFirstVerification: true,
+      error: extraction.error,
+    };
+  }
+  const { tbh } = extraction;
+
+  onProgress?.("Submitting reset to Solana...");
+  const submission = await submitResetViaWallet(tbh.commitmentBytes, {
+    wallet,
+    connection,
+    relayerUrl: config.relayerUrl,
+    relayerApiKey: config.relayerApiKey,
+  });
+
+  // Persist the new local baseline on on-chain success. A throw here would
+  // leave the user with an on-chain commitment they can't prove locally;
+  // surface the failure explicitly instead of swallowing it so the UI can
+  // prompt the user to reset again (after the 7-day cooldown) or transfer
+  // the baseline from another device.
+  if (submission.success) {
+    try {
+      await storeVerificationData({
+        fingerprint: tbh.fingerprint,
+        salt: tbh.salt.toString(),
+        commitment: tbh.commitment.toString(),
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sdkWarn(`[Entros SDK] Reset succeeded on chain but local baseline persistence failed: ${msg}`);
+      return {
+        success: false,
+        commitment: tbh.commitmentBytes,
+        txSignature: submission.txSignature,
+        attestationTx: submission.attestationTx,
+        isFirstVerification: true,
+        error:
+          "Reset confirmed on chain, but saving the new baseline to this device failed. " +
+          "Re-verification from this device will not work. Try clearing site data and " +
+          "resetting again after the 7-day cooldown, or transfer a baseline from another " +
+          "device.",
+      };
+    }
+  }
+
+  return {
+    success: submission.success,
+    commitment: tbh.commitmentBytes,
+    txSignature: submission.txSignature,
+    attestationTx: submission.attestationTx,
+    // Semantically this is a fresh baseline enrollment from the UX
+    // perspective. `isFirstVerification: true` lets the caller render
+    // success copy that matches first-time flows.
+    isFirstVerification: true,
     error: submission.error,
   };
 }
@@ -668,10 +855,62 @@ export class PulseSession {
 
     return processSensorData(sensorData, this.config, wallet, connection, onProgress);
   }
+
+  /**
+   * Complete the session as a baseline RESET instead of a normal verify.
+   *
+   * Use when the wallet has an on-chain IdentityState but the device has
+   * no recoverable local baseline (cleared site data, new device, etc).
+   * Skips the Hamming ZK proof; submits `reset_identity_state` on chain,
+   * which rotates the commitment and zeros verification history.
+   *
+   * Requires a connected wallet + Solana connection. Rejects if either
+   * is missing — reset is a wallet-mode-only operation since it writes
+   * to the user's on-chain account.
+   */
+  async completeReset(
+    wallet: any,
+    connection: any,
+    onProgress?: (stage: string) => void
+  ): Promise<VerificationResult> {
+    const active: string[] = [];
+    if (this.audioStageState === "capturing") active.push("audio");
+    if (this.motionStageState === "capturing") active.push("motion");
+    if (this.touchStageState === "capturing") active.push("touch");
+    if (active.length > 0) {
+      throw new Error(
+        `Cannot complete reset: stages still capturing: ${active.join(", ")}`
+      );
+    }
+
+    if (!wallet || !connection) {
+      return {
+        success: false,
+        commitment: new Uint8Array(32),
+        isFirstVerification: true,
+        error:
+          "Baseline reset requires a connected wallet and Solana connection. " +
+          "Reset cannot be performed in walletless mode.",
+      };
+    }
+
+    const sensorData: SensorData = {
+      audio: this.audioData,
+      motion: this.motionData,
+      touch: this.touchData,
+      modalities: {
+        audio: this.audioData !== null,
+        motion: this.motionData.length > 0,
+        touch: this.touchData.length > 0,
+      },
+    };
+
+    return processResetSensorData(sensorData, this.config, wallet, connection, onProgress);
+  }
 }
 
 /**
- * PulseSDK — main entry point for IAM Protocol verification.
+ * PulseSDK — main entry point for Entros Protocol verification.
  *
  * Two usage modes:
  *   1. Simple (backward-compatible): pulse.verify(touchElement) — captures all sensors
@@ -756,6 +995,81 @@ export class PulseSDK {
 
       await Promise.all(stopPromises);
       return session.complete(wallet, connection);
+    } catch (err: any) {
+      return {
+        success: false,
+        commitment: new Uint8Array(32),
+        isFirstVerification: true,
+        error: err.message ?? String(err),
+      };
+    }
+  }
+
+  /**
+   * Reset the wallet's on-chain baseline using a fresh capture.
+   *
+   * Convenience wrapper that mirrors `verify()` but routes the captured
+   * sensor data through `reset_identity_state` instead of `update_anchor`.
+   * Use when the wallet has an on-chain IdentityState but the local
+   * encrypted baseline is unrecoverable.
+   *
+   * For fine-grained control, call `createSession()` and `completeReset()`
+   * directly — the session API exposes per-stage start/stop hooks that
+   * this convenience wrapper trades away for simplicity.
+   */
+  async resetBaseline(
+    touchElement: HTMLElement | undefined,
+    wallet: any,
+    connection: any,
+    onProgress?: (stage: string) => void
+  ): Promise<VerificationResult> {
+    try {
+      const session = this.createSession(touchElement);
+      const stopPromises: Promise<void>[] = [];
+
+      try {
+        await session.startMotion();
+      } catch {
+        /* unexpected error — motion already skipped or idle */
+      }
+      if (session.isMotionCapturing()) {
+        stopPromises.push(
+          new Promise<void>((r) => setTimeout(r, DEFAULT_CAPTURE_MS))
+            .then(() => session.stopMotion())
+            .then(() => {})
+        );
+      }
+
+      try {
+        await session.startAudio();
+        stopPromises.push(
+          new Promise<void>((r) => setTimeout(r, DEFAULT_CAPTURE_MS))
+            .then(() => session.stopAudio())
+            .then(() => {})
+        );
+      } catch (err: any) {
+        throw new Error(
+          `Audio capture failed: ${err?.message ?? "microphone unavailable"}. Ensure microphone permission is granted and no other app is using it.`,
+        );
+      }
+
+      if (touchElement) {
+        try {
+          await session.startTouch();
+          stopPromises.push(
+            new Promise<void>((r) => setTimeout(r, DEFAULT_CAPTURE_MS))
+              .then(() => session.stopTouch())
+              .then(() => {})
+          );
+        } catch {
+          session.skipTouch();
+        }
+      } else {
+        session.skipTouch();
+      }
+
+      await Promise.all(stopPromises);
+      return session.completeReset(wallet, connection, onProgress);
     } catch (err: any) {
       return {
         success: false,

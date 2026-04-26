@@ -7,8 +7,13 @@
  * on the same origin.
  */
 
-const DB_NAME = "iam-protocol-keystore";
-const DB_VERSION = 1;
+const DB_NAME = "entros-protocol-keystore";
+// Bumped to 2 on 2026-04-20 to force `onupgradeneeded` on pre-existing DBs
+// whose `keys` object store went missing (observed in the wild — browser
+// interrupted an earlier upgrade or a concurrent-tab race left the DB
+// partially initialized). Existing users with a healthy v1 DB upgrade
+// cleanly — the handler below is idempotent.
+const DB_VERSION = 2;
 const STORE_NAME = "keys";
 const KEY_ID = "encryption-key";
 
@@ -23,11 +28,13 @@ export function hasCryptoSupport(): boolean {
 
 // --- IndexedDB key management ---
 
-function openKeyStore(): Promise<IDBDatabase> {
+function openAtVersion(version: number): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(DB_NAME, version);
     request.onupgradeneeded = () => {
       const db = request.result;
+      // Idempotent: only create if missing. Preserves existing key+data on
+      // version bumps that don't require a schema change.
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
@@ -35,6 +42,22 @@ function openKeyStore(): Promise<IDBDatabase> {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+async function openKeyStore(): Promise<IDBDatabase> {
+  const db = await openAtVersion(DB_VERSION);
+  // Defensive post-open check: if the DB somehow arrives at the current
+  // version without the required store (observed in the wild — browser
+  // interrupted an earlier upgrade, concurrent-tab race, manual DevTools
+  // deletion), close and reopen at version+1 to force `onupgradeneeded`
+  // to fire and recreate the store. Without this, every subsequent
+  // `transaction(STORE_NAME, ...)` would throw `NotFoundError` forever.
+  if (!db.objectStoreNames.contains(STORE_NAME)) {
+    const nextVersion = db.version + 1;
+    db.close();
+    return openAtVersion(nextVersion);
+  }
+  return db;
 }
 
 function getKey(db: IDBDatabase): Promise<CryptoKey | null> {
