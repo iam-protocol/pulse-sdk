@@ -828,6 +828,82 @@ export class PulseSession {
     this.touchStageState = "captured";
   }
 
+  /**
+   * @internal
+   *
+   * Run the validation step of the verify pipeline only: feature extraction
+   * + `/validate-features` POST. Returns the validation outcome without ever
+   * touching the on-chain submission path. Mirrors the production user
+   * flow's pre-payment gate — the validation server runs without requiring
+   * the wallet to have SOL, just like a real user gets a validation result
+   * before being prompted to sign the on-chain mint.
+   *
+   * Note: this is a strict subset of `complete()`. It skips the data-quality
+   * gates and re-verification check that `processSensorData` performs. The
+   * validation server still runs its full pipeline (Tier 1 + Tier 2 +
+   * phrase binding); only the client-side pre-flight checks differ.
+   *
+   * Use case: red team campaigns measuring server-side validation at scale
+   * without per-attempt SOL funding. Build-time gated identically to
+   * `__injectSensorData`; throws in production builds.
+   */
+  async __validateOnly(walletAddress: string): Promise<{
+    validated: boolean;
+    error?: string;
+  }> {
+    if (typeof __IAM_INTERNAL_TEST__ !== "boolean" || !__IAM_INTERNAL_TEST__) {
+      throw new Error(
+        "PulseSession.__validateOnly is only available in internal test builds. " +
+          "Set IAM_INTERNAL_TEST=1 when building pulse-sdk from source.",
+      );
+    }
+    if (typeof walletAddress !== "string" || walletAddress.length === 0) {
+      throw new Error(
+        "__validateOnly requires a non-empty walletAddress string (used as wallet_id in the /validate-features payload).",
+      );
+    }
+    const active: string[] = [];
+    if (this.audioStageState === "capturing") active.push("audio");
+    if (this.motionStageState === "capturing") active.push("motion");
+    if (this.touchStageState === "capturing") active.push("touch");
+    if (active.length > 0) {
+      throw new Error(
+        `Cannot validate: stages still capturing: ${active.join(", ")}`,
+      );
+    }
+    if (
+      !this.audioData ||
+      this.motionData.length === 0 ||
+      this.touchData.length === 0
+    ) {
+      throw new Error(
+        "__validateOnly requires sensor data first — call __injectSensorData() before this.",
+      );
+    }
+
+    const sensorData: SensorData = {
+      audio: this.audioData,
+      motion: this.motionData,
+      touch: this.touchData,
+      modalities: {
+        audio: true,
+        motion: true,
+        touch: true,
+      },
+    };
+
+    const extraction = await extractFingerprintAndValidate(
+      sensorData,
+      this.config,
+      walletAddress,
+    );
+
+    if (!extraction.ok) {
+      return { validated: false, error: extraction.error };
+    }
+    return { validated: true };
+  }
+
   // --- Complete ---
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Solana types are optional peer deps

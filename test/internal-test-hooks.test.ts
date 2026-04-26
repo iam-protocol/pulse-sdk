@@ -199,3 +199,96 @@ describe("PulseSession.__injectSensorData — internal-build behavior", () => {
     },
   );
 });
+
+describe("PulseSession.__validateOnly — production-build behavior", () => {
+  it.skipIf(isInternalTestBuild)(
+    "throws when called in default builds",
+    async () => {
+      const session = newSession();
+      await expect(session.__validateOnly("11111111111111111111111111111111")).rejects.toThrow(
+        /internal test builds/i,
+      );
+    },
+  );
+
+  it.skipIf(isInternalTestBuild)(
+    "throw message instructs how to enable the hook",
+    async () => {
+      const session = newSession();
+      try {
+        await session.__validateOnly("11111111111111111111111111111111");
+        throw new Error("expected __validateOnly to throw");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        expect(msg).toMatch(/IAM_INTERNAL_TEST=1/);
+      }
+    },
+  );
+});
+
+describe("PulseSession.__validateOnly — internal-build behavior", () => {
+  it.skipIf(!isInternalTestBuild)(
+    "rejects empty walletAddress before reaching the network",
+    async () => {
+      const session = newSession();
+      session.__injectSensorData({
+        audio: validAudio(),
+        motion: validMotion(),
+        touch: validTouch(),
+      });
+      await expect(session.__validateOnly("")).rejects.toThrow(/walletAddress/);
+    },
+  );
+
+  it.skipIf(!isInternalTestBuild)(
+    "rejects when no sensor data has been injected",
+    async () => {
+      const session = newSession();
+      await expect(
+        session.__validateOnly("11111111111111111111111111111111"),
+      ).rejects.toThrow(/sensor data first/i);
+    },
+  );
+
+  it.skipIf(!isInternalTestBuild)(
+    "refuses validation while a stage is actively capturing",
+    async () => {
+      const session = newSession();
+      session.__injectSensorData({
+        audio: validAudio(),
+        motion: validMotion(),
+        touch: validTouch(),
+      });
+      // Force a stage back into "capturing" to simulate a misuse race.
+      const s = session as unknown as { audioStageState: string };
+      s.audioStageState = "capturing";
+      await expect(
+        session.__validateOnly("11111111111111111111111111111111"),
+      ).rejects.toThrow(/stages still capturing: audio/);
+    },
+  );
+
+  it.skipIf(!isInternalTestBuild)(
+    "returns a structured result shape (validated + optional error)",
+    async () => {
+      const session = newSession();
+      session.__injectSensorData({
+        audio: validAudio(),
+        motion: validMotion(),
+        touch: validTouch(),
+      });
+      // Validation will fail downstream because the relayer URL is
+      // unreachable. The test asserts shape, not server outcome — we only
+      // care that __validateOnly returns the documented shape and doesn't
+      // throw on a normal validation-failed path.
+      const result = await session.__validateOnly(
+        "11111111111111111111111111111111",
+      );
+      expect(result).toBeDefined();
+      expect(typeof result.validated).toBe("boolean");
+      if (!result.validated) {
+        expect(typeof result.error).toBe("string");
+      }
+    },
+  );
+});
