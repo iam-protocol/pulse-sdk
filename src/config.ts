@@ -57,4 +57,20 @@ export interface PulseConfig {
   threshold?: number;
   /** Enable console logging for diagnostics. Default: false. */
   debug?: boolean;
+  /**
+   * Optional callback invoked when the SDK detects that encrypted local
+   * storage is unavailable (e.g. iOS Safari private browsing, Brave
+   * shields, Firefox Total Cookie Protection). The host app can prompt
+   * the user and resolve to:
+   *   - `true`  → SDK stores verification data in plaintext localStorage.
+   *               Convenient (baseline survives reload) but the
+   *               256-bit fingerprint + salt + commitment sit unencrypted.
+   *   - `false` → SDK stores in-memory only. Data is lost on reload;
+   *               user must re-enroll each session.
+   * If this callback is NOT provided, the SDK defaults to in-memory only —
+   * never silently writes plaintext to localStorage. This default is the
+   * safer choice; opt-in to plaintext via the callback when the host app
+   * has surfaced the privacy tradeoff to the user.
+   */
+  onPrivacyFallback?: () => Promise<boolean>;
 }

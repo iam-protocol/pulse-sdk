@@ -7,6 +7,14 @@ const TARGET_SAMPLE_RATE = 16000;
  * Capture audio at 16kHz until signaled to stop.
  * Uses ScriptProcessorNode for raw PCM sample access.
  *
+ * @privacyGuarantee Raw audio samples returned from this function are processed
+ * locally by the SDK's feature extraction pipeline. The 134-feature derived
+ * statistical summary is the only audio-related signal that crosses the
+ * device boundary. The single sanctioned exception is the encoded base64
+ * audio bytes sent to the validator's `/validate-features` endpoint for
+ * server-side phrase content binding (master-list #89), which the validator
+ * processes ephemerally — see entros.io paper §6.8 for the threat model.
+ *
  * NOTE: ScriptProcessorNode is deprecated in favor of AudioWorklet.
  * Migration planned for v1.0. ScriptProcessorNode is used because it
  * provides synchronous access to raw PCM samples without requiring a
@@ -39,15 +47,33 @@ export async function captureAudio(
     },
   });
 
-  const ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
-  await ctx.resume(); // Required on iOS — AudioContext may be suspended outside user gesture
-  const capturedSampleRate = ctx.sampleRate;
-  const source = ctx.createMediaStreamSource(stream);
+  // If anything between `getUserMedia` and the Promise constructor throws
+  // (AudioContext construction, ctx.resume(), createMediaStreamSource) the
+  // stream we just acquired would leak indefinitely. Wrap the setup in a
+  // try-on-error path that stops the stream tracks before re-throwing.
+  let ctx: AudioContext;
+  let source: MediaStreamAudioSourceNode;
+  let capturedSampleRate: number;
+  try {
+    ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+    await ctx.resume(); // Required on iOS — AudioContext may be suspended outside user gesture
+    capturedSampleRate = ctx.sampleRate;
+    source = ctx.createMediaStreamSource(stream);
+  } catch (err) {
+    // Stop tracks we already acquired; we can't acquire them again so leaks
+    // would persist for the page lifetime if we don't release here.
+    if (!preAcquiredStream) {
+      stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+    }
+    throw err;
+  }
   const chunks: Float32Array[] = [];
   const startTime = performance.now();
 
   return new Promise((resolve) => {
     let stopped = false;
+    // See motion.ts for the abortTimer rationale.
+    let abortTimer: ReturnType<typeof setTimeout> | null = null;
     const bufferSize = 4096;
     const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
 
@@ -69,6 +95,7 @@ export async function captureAudio(
       if (stopped) return;
       stopped = true;
       clearTimeout(maxTimer);
+      if (abortTimer !== null) clearTimeout(abortTimer);
 
       processor.disconnect();
       source.disconnect();
@@ -94,14 +121,14 @@ export async function captureAudio(
 
     if (signal) {
       if (signal.aborted) {
-        setTimeout(stopCapture, minDurationMs);
+        abortTimer = setTimeout(stopCapture, minDurationMs);
       } else {
         signal.addEventListener(
           "abort",
           () => {
             const elapsed = performance.now() - startTime;
             const remaining = Math.max(0, minDurationMs - elapsed);
-            setTimeout(stopCapture, remaining);
+            abortTimer = setTimeout(stopCapture, remaining);
           },
           { once: true }
         );

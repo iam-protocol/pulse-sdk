@@ -16,6 +16,18 @@ const ENCRYPTED_VERSION = 2;
 // in private browsing mode must re-enroll on each session.
 let inMemoryStore: StoredVerificationData | null = null;
 
+// Module-level privacy-fallback callback. Set by PulseSDK constructor via
+// `setPrivacyFallback`. Mirrors the `setDebug` pattern in `log.ts` so
+// `storeVerificationData` can be called without threading the config
+// through every layer.
+let privacyFallbackCallback: (() => Promise<boolean>) | null = null;
+
+export function setPrivacyFallback(
+  cb: (() => Promise<boolean>) | null | undefined
+): void {
+  privacyFallbackCallback = cb ?? null;
+}
+
 // --- Envelope detection ---
 
 interface EncryptedEnvelope {
@@ -25,21 +37,29 @@ interface EncryptedEnvelope {
 }
 
 function isEncryptedEnvelope(obj: unknown): obj is EncryptedEnvelope {
+  if (typeof obj !== "object" || obj === null) return false;
+  const o = obj as Record<string, unknown>;
   return (
-    typeof obj === "object" &&
-    obj !== null &&
-    (obj as Record<string, unknown>).v === ENCRYPTED_VERSION &&
-    typeof (obj as Record<string, unknown>).iv === "string" &&
-    typeof (obj as Record<string, unknown>).ct === "string"
+    o.v === ENCRYPTED_VERSION &&
+    typeof o.iv === "string" &&
+    o.iv.length > 0 &&
+    typeof o.ct === "string" &&
+    o.ct.length > 0
   );
 }
 
 function isPlaintextData(obj: unknown): obj is StoredVerificationData {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    Array.isArray((obj as Record<string, unknown>).fingerprint)
-  );
+  if (typeof obj !== "object" || obj === null) return false;
+  const o = obj as Record<string, unknown>;
+  // Require all four fields with correct types. The previous `Array.isArray`
+  // check on `fingerprint` alone passed envelopes with missing salt or
+  // wrong-typed timestamp, which would crash later during use.
+  if (!Array.isArray(o.fingerprint)) return false;
+  if (!o.fingerprint.every((bit) => typeof bit === "number")) return false;
+  if (typeof o.salt !== "string" || o.salt.length === 0) return false;
+  if (typeof o.commitment !== "string" || o.commitment.length === 0) return false;
+  if (typeof o.timestamp !== "number" || !Number.isFinite(o.timestamp)) return false;
+  return true;
 }
 
 // --- Public API ---
@@ -92,21 +112,56 @@ export async function fetchIdentityState(
 
 /**
  * Store verification data locally for re-verification.
- * Encrypts with AES-256-GCM when Web Crypto is available.
- * Falls back to plaintext with a warning otherwise.
+ *
+ * Storage tiers (preferred first):
+ *   1. Encrypted localStorage envelope (Web Crypto available).
+ *   2. If crypto unavailable AND `onPrivacyFallback` callback registered
+ *      AND the callback resolves true, plaintext localStorage. The host
+ *      app is responsible for surfacing the privacy tradeoff to the user
+ *      before approving the fallback.
+ *   3. Otherwise, in-memory only (lost on reload). Safer default —
+ *      never silently writes plaintext to localStorage.
  */
 export async function storeVerificationData(data: StoredVerificationData): Promise<void> {
   try {
     if (!hasCryptoSupport()) {
-      sdkWarn("[Entros SDK] Crypto unavailable — verification data stored unencrypted");
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      // Crypto unavailable → consult the host-provided privacy callback.
+      // No callback registered → default to in-memory only (safer than
+      // the previous behavior of silently writing plaintext).
+      const allowPlaintext = privacyFallbackCallback
+        ? await privacyFallbackCallback().catch(() => false)
+        : false;
+      if (allowPlaintext) {
+        sdkWarn(
+          "[Entros SDK] Crypto unavailable; user-approved plaintext storage"
+        );
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } else {
+        sdkWarn(
+          "[Entros SDK] Crypto unavailable and no privacy-fallback approval — using in-memory storage (data lost on reload)"
+        );
+        inMemoryStore = data;
+      }
       return;
     }
 
     const key = await getOrCreateEncryptionKey();
     if (!key) {
-      sdkWarn("[Entros SDK] Encryption key unavailable — storing unencrypted");
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      // Encryption key unavailable for this session — same fallback flow.
+      const allowPlaintext = privacyFallbackCallback
+        ? await privacyFallbackCallback().catch(() => false)
+        : false;
+      if (allowPlaintext) {
+        sdkWarn(
+          "[Entros SDK] Encryption key unavailable; user-approved plaintext storage"
+        );
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } else {
+        sdkWarn(
+          "[Entros SDK] Encryption key unavailable and no privacy-fallback approval — using in-memory storage"
+        );
+        inMemoryStore = data;
+      }
       return;
     }
 
