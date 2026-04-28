@@ -28,6 +28,7 @@ import { submitViaRelayer } from "./submit/relayer";
 import {
   storeVerificationData,
   loadVerificationData,
+  setPrivacyFallback,
 } from "./identity/anchor";
 
 // Build-time constant. Replaced by tsup `define` (true when IAM_INTERNAL_TEST=1)
@@ -213,11 +214,25 @@ async function extractFingerprintAndValidate(
         return {
           ok: false,
           error: (errorBody as Record<string, string>).error || "Feature validation failed",
+          reason: (errorBody as Record<string, string>).reason,
         };
       }
     } catch (err) {
+      // Network failure / timeout / abort. Previously this silently
+      // continued and skipped server-side validation, which let a
+      // network-failure attacker bypass Tier 1 / Tier 2 + phrase
+      // binding entirely. Return as a recoverable error instead;
+      // the host app can surface a retry CTA. The reason category
+      // `validation_unavailable` is client-side only (distinct from
+      // any server-side `ReasonCode`) and is intended for soft-fail
+      // UX similar to a transient network error.
       const msg = err instanceof Error ? err.message : String(err);
-      sdkWarn(`[Entros SDK] Feature validation unavailable: ${msg}, proceeding without server validation`);
+      sdkWarn(`[Entros SDK] Feature validation unavailable: ${msg}`);
+      return {
+        ok: false,
+        error: "Validation service unreachable. Please check your connection and try again.",
+        reason: "validation_unavailable",
+      };
     }
   }
 
@@ -929,6 +944,7 @@ export class PulseSDK {
       ...config,
     };
     setDebug(config.debug ?? false);
+    setPrivacyFallback(config.onPrivacyFallback);
   }
 
   /**

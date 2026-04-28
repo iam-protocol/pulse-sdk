@@ -16,6 +16,18 @@ const ENCRYPTED_VERSION = 2;
 // in private browsing mode must re-enroll on each session.
 let inMemoryStore: StoredVerificationData | null = null;
 
+// Module-level privacy-fallback callback. Set by PulseSDK constructor via
+// `setPrivacyFallback`. Mirrors the `setDebug` pattern in `log.ts` so
+// `storeVerificationData` can be called without threading the config
+// through every layer.
+let privacyFallbackCallback: (() => Promise<boolean>) | null = null;
+
+export function setPrivacyFallback(
+  cb: (() => Promise<boolean>) | null | undefined
+): void {
+  privacyFallbackCallback = cb ?? null;
+}
+
 // --- Envelope detection ---
 
 interface EncryptedEnvelope {
@@ -92,21 +104,56 @@ export async function fetchIdentityState(
 
 /**
  * Store verification data locally for re-verification.
- * Encrypts with AES-256-GCM when Web Crypto is available.
- * Falls back to plaintext with a warning otherwise.
+ *
+ * Storage tiers (preferred first):
+ *   1. Encrypted localStorage envelope (Web Crypto available).
+ *   2. If crypto unavailable AND `onPrivacyFallback` callback registered
+ *      AND the callback resolves true, plaintext localStorage. The host
+ *      app is responsible for surfacing the privacy tradeoff to the user
+ *      before approving the fallback.
+ *   3. Otherwise, in-memory only (lost on reload). Safer default —
+ *      never silently writes plaintext to localStorage.
  */
 export async function storeVerificationData(data: StoredVerificationData): Promise<void> {
   try {
     if (!hasCryptoSupport()) {
-      sdkWarn("[Entros SDK] Crypto unavailable — verification data stored unencrypted");
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      // Crypto unavailable → consult the host-provided privacy callback.
+      // No callback registered → default to in-memory only (safer than
+      // the previous behavior of silently writing plaintext).
+      const allowPlaintext = privacyFallbackCallback
+        ? await privacyFallbackCallback().catch(() => false)
+        : false;
+      if (allowPlaintext) {
+        sdkWarn(
+          "[Entros SDK] Crypto unavailable; user-approved plaintext storage"
+        );
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } else {
+        sdkWarn(
+          "[Entros SDK] Crypto unavailable and no privacy-fallback approval — using in-memory storage (data lost on reload)"
+        );
+        inMemoryStore = data;
+      }
       return;
     }
 
     const key = await getOrCreateEncryptionKey();
     if (!key) {
-      sdkWarn("[Entros SDK] Encryption key unavailable — storing unencrypted");
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      // Encryption key unavailable for this session — same fallback flow.
+      const allowPlaintext = privacyFallbackCallback
+        ? await privacyFallbackCallback().catch(() => false)
+        : false;
+      if (allowPlaintext) {
+        sdkWarn(
+          "[Entros SDK] Encryption key unavailable; user-approved plaintext storage"
+        );
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } else {
+        sdkWarn(
+          "[Entros SDK] Encryption key unavailable and no privacy-fallback approval — using in-memory storage"
+        );
+        inMemoryStore = data;
+      }
       return;
     }
 
