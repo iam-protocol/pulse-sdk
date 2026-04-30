@@ -122,12 +122,12 @@ type ExtractionResult =
       fingerprint: number[];
       tbh: TBH;
       /**
-       * Validator-signed mint receipt (master-list #146 Phase 4). Present
-       * only when the request reached the validator with `commitment_new_hex`
-       * AND the validator has a signing key configured. `undefined` indicates
-       * the SDK should mint without an Ed25519 prefix; while Phase 3 is
-       * log-only on-chain this is harmless, but once Phase 5 enforcement
-       * flips, missing receipts cause `mint_anchor` to hard-fail.
+       * Validator-signed mint receipt. Present only when the request
+       * reached the validator with `commitment_new_hex` AND the validator
+       * has a signing key configured. `undefined` indicates the SDK
+       * should mint without an Ed25519 prefix; while the on-chain check
+       * is log-only this is harmless, but once enforcement is enabled
+       * missing receipts cause `mint_anchor` to hard-fail.
        */
       signedReceipt?: SignedReceiptDto;
     }
@@ -169,11 +169,11 @@ async function extractFingerprintAndValidate(
   );
 
   // Compute the SimHash fingerprint and Poseidon TBH commitment BEFORE the
-  // validation POST (master-list #146 Phase 4). The validator signs a
-  // (wallet, commitment, validated_at) receipt that the SDK bundles before
-  // `mint_anchor` in the same atomic transaction; for the validator to sign
-  // the right commitment, we must transmit it in the request. SimHash +
-  // Poseidon together cost ~20ms — trivial overhead even on rejection paths.
+  // validation POST. The validator signs a (wallet, commitment, validated_at)
+  // receipt that the SDK bundles before `mint_anchor` in the same atomic
+  // transaction; for the validator to sign the right commitment, we must
+  // transmit it in the request. SimHash + Poseidon together cost ~20ms —
+  // trivial overhead even on rejection paths.
   const fingerprint = simhash(normalizedFeatures);
   const tbh = await generateTBH(fingerprint);
 
@@ -208,12 +208,12 @@ async function extractFingerprintAndValidate(
       const audioSampleRateHz = sensorData.audio?.sampleRate;
 
       // Hex-encode the 32-byte commitment for the validator's signing
-      // input (master-list #146 Phase 4). The validator only signs when
-      // this field is present AND its own signing key is configured; the
-      // SDK only consumes the receipt on first-verification, so sending
-      // it on every wallet-connected request is harmless on the re-verify
-      // path (validator signs cheaply, executor passes through, SDK
-      // ignores the field for `update_anchor`).
+      // input. The validator only signs when this field is present AND
+      // its own signing key is configured; the SDK only consumes the
+      // receipt on first-verification, so sending it on every
+      // wallet-connected request is harmless on the re-verify path
+      // (validator signs cheaply, executor passes through, SDK ignores
+      // the field for `update_anchor`).
       const commitmentNewHex = bytesToHex(tbh.commitmentBytes);
 
       // Whisper-tiny inference adds ~1s to the validation round trip.
@@ -249,14 +249,13 @@ async function extractFingerprintAndValidate(
         };
       }
 
-      // Parse the validator's success body for the signed receipt
-      // (master-list #146 Phase 4). Older validator deploys omit the field
-      // entirely — the SDK proceeds without a receipt and Phase 3's
-      // log-only on-chain check writes "no preceding instruction" to the
-      // tx logs. After Phase 5 enforcement flips, missing receipts will
-      // hard-fail mint_anchor; the executor + validator deploys must
-      // therefore be brought up to receipt-supporting versions before
-      // the on-chain enforcement flag flips.
+      // Parse the validator's success body for the signed receipt. Older
+      // validator deploys omit the field entirely — the SDK proceeds
+      // without a receipt and the on-chain log-only check writes "no
+      // preceding instruction" to the tx logs. Once on-chain enforcement
+      // is enabled, missing receipts will hard-fail mint_anchor; the
+      // executor + validator deploys must therefore be brought up to
+      // receipt-supporting versions before the enforcement flag flips.
       try {
         const successBody = (await validateResponse.json()) as {
           signed_receipt?: SignedReceiptDto;
@@ -494,10 +493,9 @@ async function processSensorData(
     if (isFirstVerification) {
       // Pass the validator-signed receipt (when present) so submitViaWallet
       // can bundle an `Ed25519Program::verify` instruction before
-      // `mint_anchor` in the same atomic transaction (master-list #146
-      // Phase 4). Re-verification doesn't need the receipt — the binding
-      // is already enforced via the VerificationResult PDA path that
-      // `update_anchor` consumes.
+      // `mint_anchor` in the same atomic transaction. Re-verification
+      // doesn't need the receipt — the binding is already enforced via
+      // the VerificationResult PDA path that `update_anchor` consumes.
       submission = await submitViaWallet(
         solanaProof ?? { proofBytes: new Uint8Array(0), publicInputs: [] },
         tbh.commitmentBytes,

@@ -8,9 +8,9 @@ export interface SubmissionResult {
 
 /**
  * Validator-signed receipt binding (wallet, commitment, validated_at) for the
- * upcoming `mint_anchor` transaction (master-list #146 Phase 4). Returned in
- * the `/validate-features` response when the request includes
- * `commitment_new_hex` and the validator has a signing key configured.
+ * upcoming `mint_anchor` transaction. Returned in the `/validate-features`
+ * response when the request includes `commitment_new_hex` and the validator
+ * has a signing key configured.
  *
  * Wire fields are byte-identical to `entros_validation::SignedReceiptDto` and
  * the executor's local mirror at `executor-node::validation::SignedReceiptDto`.

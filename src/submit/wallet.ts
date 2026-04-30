@@ -102,12 +102,12 @@ export async function submitViaWallet(
     relayerUrl?: string;
     relayerApiKey?: string;
     /**
-     * Validator-signed mint receipt (master-list #146 Phase 4). Consumed
-     * only on the first-verification path: when present, the SDK prepends
-     * an `Ed25519Program::verify` instruction so on-chain `mint_anchor`
-     * can confirm the commitment was endorsed by the configured validator.
-     * Re-verification ignores the field entirely — `update_anchor` enforces
-     * binding via the VerificationResult PDA instead.
+     * Validator-signed mint receipt. Consumed only on the first-verification
+     * path: when present, the SDK prepends an `Ed25519Program::verify`
+     * instruction so on-chain `mint_anchor` can confirm the commitment was
+     * endorsed by the configured validator. Re-verification ignores the
+     * field entirely — `update_anchor` enforces binding via the
+     * VerificationResult PDA instead.
      */
     signedReceipt?: SignedReceiptDto;
   }
@@ -294,20 +294,16 @@ export async function submitViaWallet(
     } else {
       // First verification: mint anchor. Bundles an `Ed25519Program::verify`
       // instruction before `mint_anchor` when the validator returned a
-      // signed receipt (master-list #146 Phase 4). The on-chain program
-      // inspects the preceding instruction via the Instructions sysvar to
-      // confirm the validator endorsed (wallet, commitment, validated_at)
-      // before allowing the mint.
-      //
-      // Transaction shape:
-      //   [0] (optional) Ed25519Program::verify(receipt)
-      //   [1] mint_anchor(initial_commitment)
+      // signed receipt. The on-chain program inspects the preceding
+      // instruction via the Instructions sysvar to confirm the validator
+      // endorsed (wallet, commitment, validated_at) before allowing the
+      // mint.
       //
       // The `instructions_sysvar` account is required by the on-chain
-      // `MintAnchor` accounts struct as of Phase 3 — it must be present
-      // even when no receipt is bundled (the on-chain check is log-only
-      // until Phase 5 enforcement flips, but the Anchor framework itself
-      // requires the account match the IDL).
+      // `MintAnchor` accounts struct unconditionally — it must be present
+      // even when no receipt is bundled (the on-chain check is currently
+      // log-only, but the Anchor framework itself requires every account
+      // listed in the IDL to be supplied).
       const anchorIdl = await anchor.Program.fetchIdl(anchorProgramId, provider);
       if (!anchorIdl) {
         return {
@@ -375,10 +371,10 @@ export async function submitViaWallet(
       // Decode the receipt up front so we can hard-fail if the validator
       // returned malformed bytes. Silently falling back to a no-receipt
       // mint when the caller expected a binding would mask validator bugs
-      // and, after Phase 5 enforcement flips, would produce a confusing
-      // on-chain reject after the user has already approved a wallet
-      // signature. Fail-fast lets the caller surface a clear error and
-      // retry once the validator is healthy.
+      // and, once on-chain enforcement is enabled, would produce a
+      // confusing on-chain reject after the user has already approved a
+      // wallet signature. Fail-fast lets the caller surface a clear error
+      // and retry once the validator is healthy.
       let ed25519Ix: import("@solana/web3.js").TransactionInstruction | null = null;
       if (options.signedReceipt) {
         ed25519Ix = await buildEd25519ReceiptIx(options.signedReceipt);
@@ -393,12 +389,13 @@ export async function submitViaWallet(
           "[Entros SDK] Bundling validator-signed mint receipt before mint_anchor"
         );
       } else {
-        // No receipt is the legitimate "older validator" path. Phase 3 is
-        // log-only on-chain so the mint still succeeds; Phase 5 enforcement
-        // will later turn this into a hard reject, at which point operators
-        // must ensure the validator is configured for receipt signing.
+        // No receipt is the legitimate "older validator" path. The on-chain
+        // check is currently log-only so the mint still succeeds; once
+        // enforcement is enabled, this will turn into a hard reject and
+        // operators must ensure the validator is configured for receipt
+        // signing.
         sdkLog(
-          "[Entros SDK] No validator receipt available; minting without binding (Phase 3 log-only)"
+          "[Entros SDK] No validator receipt available; minting without binding (on-chain check is log-only today)"
         );
       }
 
@@ -412,9 +409,10 @@ export async function submitViaWallet(
       // Ed25519 ix and `mint_anchor`. The on-chain receipt parser locates
       // the receipt at `current_instruction_index - 1`, so any ix between
       // the Ed25519 prefix and `mint_anchor` would silently break the
-      // binding (Phase 3 log-only) or hard-fail the mint (Phase 5).
-      // 200K covers the mint_anchor compute cost; the Ed25519 precompile
-      // runs in the runtime, not against the program's CU budget.
+      // binding while the check is log-only or hard-fail the mint once
+      // enforcement is enabled. 200K covers the mint_anchor compute cost;
+      // the Ed25519 precompile runs in the runtime, not against the
+      // program's CU budget.
       const tx = new Transaction();
       tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
       if (ed25519Ix) tx.add(ed25519Ix);
