@@ -8,12 +8,19 @@ import { buildEd25519ReceiptIx } from "./receipt";
 
 /**
  * Best-effort SAS attestation request. POSTs to the executor's `/attest`
- * endpoint with the wallet's public key, an optional server-issued challenge
- * nonce, and an `Entros-ATTEST:{wallet}:{timestamp}` ownership signature.
+ * endpoint with the wallet's public key, a server-issued challenge nonce,
+ * and an `Entros-ATTEST:{wallet}:{timestamp}` ownership signature.
  *
  * Returns the attestation tx signature on success, `undefined` on any
  * failure (attestation is non-fatal — the on-chain tx has already confirmed
  * by the time this is called).
+ *
+ * Wallet-only path: the executor's `/attest` endpoint requires nonce +
+ * signature + message on every request (walletless tier no longer writes
+ * to SAS). If any of those is unavailable on the client side — wallet
+ * adapter has no `signMessage`, signing throws, or no server nonce was
+ * issued during this verification — we skip the request entirely instead
+ * of sending a doomed-to-400 call.
  */
 async function requestSasAttestation(
   wallet: any,
@@ -22,6 +29,30 @@ async function requestSasAttestation(
   relayerApiKey: string | undefined,
   serverNonce: number[] | undefined,
 ): Promise<string | undefined> {
+  if (!serverNonce) {
+    sdkLog("[Entros SDK] Skipping SAS attestation: no server-issued nonce");
+    return undefined;
+  }
+  if (!wallet?.signMessage) {
+    sdkLog("[Entros SDK] Skipping SAS attestation: wallet does not support signMessage");
+    return undefined;
+  }
+
+  let signature: string;
+  let message: string;
+  try {
+    const timestamp = Math.floor(Date.now() / 1000);
+    message = `Entros-ATTEST:${walletAddress}:${timestamp}`;
+    const messageBytes = new TextEncoder().encode(message);
+    const sigBytes: Uint8Array = await wallet.signMessage(messageBytes);
+    signature = Array.from(sigBytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    sdkWarn("[Entros SDK] Wallet signMessage failed, skipping SAS attestation");
+    return undefined;
+  }
+
   try {
     const attestHeaders: Record<string, string> = {
       "Content-Type": "application/json",
@@ -36,24 +67,12 @@ async function requestSasAttestation(
     const baseUrl = new URL(relayerUrl);
     const attestUrl = `${baseUrl.origin}/attest`;
 
-    const attestBody: Record<string, unknown> = { wallet_address: walletAddress };
-    if (serverNonce) attestBody.nonce = serverNonce;
-
-    if (wallet?.signMessage) {
-      try {
-        const timestamp = Math.floor(Date.now() / 1000);
-        const attestMessage = `Entros-ATTEST:${walletAddress}:${timestamp}`;
-        const messageBytes = new TextEncoder().encode(attestMessage);
-        const sigBytes: Uint8Array = await wallet.signMessage(messageBytes);
-        const sigHex = Array.from(sigBytes)
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join("");
-        attestBody.signature = sigHex;
-        attestBody.message = attestMessage;
-      } catch {
-        sdkWarn("Wallet signMessage failed, skipping ownership proof");
-      }
-    }
+    const attestBody: Record<string, unknown> = {
+      wallet_address: walletAddress,
+      nonce: serverNonce,
+      signature,
+      message,
+    };
 
     const attestRes = await fetch(attestUrl, {
       method: "POST",
