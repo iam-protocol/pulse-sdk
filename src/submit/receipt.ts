@@ -27,14 +27,17 @@ export function bytesToHex(bytes: Uint8Array): string {
 
 /**
  * Decode a hex string into a Uint8Array of the expected byte length. Returns
- * `null` on malformed input (odd length, non-hex characters, wrong length).
- * Permissive about a leading `0x` because some integrations may strip or
- * preserve it inconsistently.
+ * `null` on malformed input (odd length, non-lowercase-hex characters, wrong
+ * length). Permissive about a leading `0x` because some integrations may
+ * strip or preserve it inconsistently. Strict on case so a future validator
+ * regression that emits uppercase hex surfaces immediately rather than
+ * silently accepting drift from the wire-format contract (Rust `hex::encode`
+ * is canonically lowercase).
  */
 function hexToBytes(hex: string, expectedLen: number): Uint8Array | null {
   const trimmed = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
   if (trimmed.length !== expectedLen * 2) return null;
-  if (!/^[0-9a-fA-F]+$/.test(trimmed)) return null;
+  if (!/^[0-9a-f]+$/.test(trimmed)) return null;
   const out = new Uint8Array(expectedLen);
   for (let i = 0; i < expectedLen; i += 1) {
     out[i] = parseInt(trimmed.substr(i * 2, 2), 16);
@@ -45,7 +48,8 @@ function hexToBytes(hex: string, expectedLen: number): Uint8Array | null {
 /**
  * Decoded byte form of a `SignedReceiptDto`. `null` slots indicate the
  * caller should treat the receipt as unusable and fall back to the
- * no-receipt mint flow (Phase 3 on-chain check logs and proceeds).
+ * no-receipt mint flow (the on-chain check is currently log-only and
+ * proceeds when no preceding Ed25519 ix is present).
  */
 export interface DecodedReceipt {
   publicKey: Uint8Array;
@@ -68,14 +72,14 @@ export function decodeSignedReceipt(receipt: SignedReceiptDto): DecodedReceipt |
 
 /**
  * Build the `Ed25519Program::verify` instruction that binds a validator-signed
- * mint receipt to the immediately-following `mint_anchor` instruction
- * (master-list #146 Phase 4).
+ * mint receipt to the immediately-following `mint_anchor` instruction.
  *
  * Returns `null` if the receipt fails to decode — caller should fall back to
- * sending `mint_anchor` without an Ed25519 prefix. Phase 3's on-chain check
- * is log-only, so the fallback still works on the deployed program; once
- * Phase 5 enforcement flips, missing receipts hard-fail and the SDK's no-op
- * fallback becomes a deliberate "no-receipt" path that mint_anchor rejects.
+ * sending `mint_anchor` without an Ed25519 prefix. The on-chain check is
+ * currently log-only, so the fallback still works on the deployed program;
+ * once enforcement is enabled, missing receipts hard-fail and the SDK's
+ * no-op fallback becomes a deliberate "no-receipt" path that `mint_anchor`
+ * rejects.
  *
  * Web3.js's `Ed25519Program.createInstructionWithPublicKey` defaults the
  * three `*_instruction_index` fields to `0xFFFF`, which is the exact
