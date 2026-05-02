@@ -65,6 +65,16 @@ async function getMeyda(): Promise<any> {
 }
 
 /**
+ * Frame batch size between cooperative yields inside `detectF0Contour`.
+ * YIN at 16 kHz / 1024-sample frame is ~1 ms per frame on commodity
+ * hardware, so 16 frames ≈ one 60 fps paint budget — yielding here keeps
+ * the verify spinner repainting smoothly through the dominant block of
+ * extraction work (which the user perceives as the freeze right after
+ * the 12 s capture ends, before any other yield site fires).
+ */
+const F0_YIELD_EVERY_N_FRAMES = 16;
+
+/**
  * Detect F0 (fundamental frequency) contour and amplitude peaks per frame.
  */
 async function detectF0Contour(
@@ -105,6 +115,13 @@ async function detectF0Contour(
       sum += (frame[j] ?? 0) * (frame[j] ?? 0);
     }
     amplitudes.push(Math.sqrt(sum / frame.length));
+
+    // Cooperative yield every N frames so the host UI gets a paint frame
+    // mid-loop. Skipped on frame 0 (no work done yet) and the last frame
+    // (the function returns immediately after).
+    if (i > 0 && i < numFrames - 1 && (i % F0_YIELD_EVERY_N_FRAMES) === 0) {
+      await yieldToMainThread();
+    }
   }
 
   return { f0, amplitudes, periods };
