@@ -63,11 +63,14 @@ function makeTouchSamples(count: number): TouchSample[] {
 // --- Speaker Feature Tests ---
 
 describe("speaker feature extraction", () => {
-  it("produces 44 features from normal speech audio", async () => {
+  // v2 audio block: 44 legacy + 78 MFCC + 24 LPC + 16 formant trajectories +
+  // 9 voice quality + 5 pitch DCT = 176. The constant is asserted via
+  // SPEAKER_FEATURE_COUNT to catch any drift from the documented total.
+  it("produces v2 speaker feature count from normal speech audio", async () => {
     const audio = makeAudio({ length: 32000, sampleRate: 16000 });
     const features = await extractSpeakerFeatures(audio);
     expect(features).toHaveLength(SPEAKER_FEATURE_COUNT);
-    expect(features).toHaveLength(44);
+    expect(features).toHaveLength(176);
   });
 
   it("produces no NaN values from normal audio", async () => {
@@ -81,7 +84,7 @@ describe("speaker feature extraction", () => {
   it("produces no NaN values from silent audio", async () => {
     const audio = makeAudio({ samples: silentAudio(32000), sampleRate: 16000 });
     const features = await extractSpeakerFeatures(audio);
-    expect(features).toHaveLength(44);
+    expect(features).toHaveLength(SPEAKER_FEATURE_COUNT);
     for (let i = 0; i < features.length; i++) {
       expect(Number.isFinite(features[i]), `feature[${i}] is ${features[i]}`).toBe(true);
     }
@@ -91,7 +94,7 @@ describe("speaker feature extraction", () => {
     // iOS ignores requested 16kHz and runs AudioContext at 48kHz
     const audio = makeAudio({ length: 48000 * 2, sampleRate: 48000 });
     const features = await extractSpeakerFeatures(audio);
-    expect(features).toHaveLength(44);
+    expect(features).toHaveLength(SPEAKER_FEATURE_COUNT);
     for (let i = 0; i < features.length; i++) {
       expect(Number.isFinite(features[i]), `feature[${i}] is ${features[i]}`).toBe(true);
     }
@@ -100,7 +103,7 @@ describe("speaker feature extraction", () => {
   it("produces no NaN values from silent 48kHz audio", async () => {
     const audio = makeAudio({ samples: silentAudio(96000), sampleRate: 48000 });
     const features = await extractSpeakerFeatures(audio);
-    expect(features).toHaveLength(44);
+    expect(features).toHaveLength(SPEAKER_FEATURE_COUNT);
     for (let i = 0; i < features.length; i++) {
       expect(Number.isFinite(features[i]), `feature[${i}] is ${features[i]}`).toBe(true);
     }
@@ -109,7 +112,7 @@ describe("speaker feature extraction", () => {
   it("returns zeros for too-short audio", async () => {
     const audio = makeAudio({ length: 500, sampleRate: 16000 });
     const features = await extractSpeakerFeatures(audio);
-    expect(features).toHaveLength(44);
+    expect(features).toHaveLength(SPEAKER_FEATURE_COUNT);
     expect(features.every((v) => v === 0)).toBe(true);
   });
 
@@ -120,6 +123,23 @@ describe("speaker feature extraction", () => {
     const f2 = await extractSpeakerFeatures(audio2);
     const identical = f1.every((v, i) => v === f2[i]);
     expect(identical).toBe(false);
+  });
+
+  it("preserves the legacy 44-feature layout at the head of the audio block", async () => {
+    // The first 44 features must be the original F0/jitter/shimmer/HNR/
+    // formant-ratios/LTAS/voicing/amplitude blocks, in the same order, so
+    // entros-validation's named sub-range constants (JITTER, SHIMMER,
+    // LTAS_FLATNESS_VAR, etc. — at indices 9, 13, 35, …) keep pointing at
+    // the same data and the TTS detector's threshold checks remain valid.
+    const audio = makeAudio({ length: 32000, sampleRate: 16000 });
+    const features = await extractSpeakerFeatures(audio);
+    // We can't assert specific values without a known-input reference, but
+    // we can assert finiteness across the legacy slice and confirm the new
+    // blocks live AFTER index 44.
+    for (let i = 0; i < 44; i++) {
+      expect(Number.isFinite(features[i])).toBe(true);
+    }
+    expect(features.length).toBeGreaterThan(44);
   });
 });
 
@@ -207,12 +227,20 @@ describe("mouse dynamics extraction", () => {
 // --- Fusion Tests ---
 
 describe("feature fusion (normalizeGroup + fuseFeatures)", () => {
-  it("produces 134 features from all three modalities", () => {
+  // These tests exercise the fusion ALGORITHM (concatenate three groups,
+  // z-score normalize each independently). The protocol-level audio
+  // count is 176 after Sprint 1 of the v2 feature pipeline, but
+  // fuseFeatures itself is size-agnostic — it concatenates whatever the
+  // caller passes. Keeping conventional small inputs here keeps the
+  // mechanism tests readable; the protocol-level count is asserted
+  // separately in the speaker / motion / touch suites above.
+
+  it("concatenates three modality groups", () => {
     const audio = new Array(44).fill(0).map(() => Math.random() * 100);
     const motion = new Array(54).fill(0).map(() => Math.random());
     const touch = new Array(36).fill(0).map(() => Math.random() * 10);
     const fused = fuseFeatures(audio, motion, touch);
-    expect(fused).toHaveLength(134);
+    expect(fused).toHaveLength(audio.length + motion.length + touch.length);
   });
 
   it("produces no NaN values even with NaN inputs", () => {
