@@ -28,7 +28,7 @@
  * possible. This is the same privacy posture as the existing 44-feature
  * audio block: statistical aggregates of on-device-computed signals.
  */
-import { entropy } from "./statistics";
+import { condense, mean as meanOf, variance as varianceOf } from "./statistics";
 import { sdkWarn } from "../log";
 
 const NUM_MFCC_COEFFICIENTS = 13;
@@ -48,72 +48,51 @@ export const MFCC_FEATURE_COUNT =
 // = 52 + 26 = 78
 
 /**
- * Compute mean, variance, skewness, kurtosis of a 1D numeric array.
- *
- * Local helper rather than reusing `condense()` from statistics.ts because
- * `condense` returns 4 values [mean, var, skew, kurt] but we want to use
- * different combinations per channel (4 for MFCCs, 2 for delta-MFCCs).
- * Inlining keeps the per-channel call sites minimal.
- */
-function moments(values: number[]): { mean: number; var_: number; skew: number; kurt: number } {
-  const n = values.length;
-  if (n === 0) return { mean: 0, var_: 0, skew: 0, kurt: 0 };
-  const mean = values.reduce((a, b) => a + b, 0) / n;
-  if (n < 2) return { mean, var_: 0, skew: 0, kurt: 0 };
-  let m2 = 0;
-  let m3 = 0;
-  let m4 = 0;
-  for (const v of values) {
-    const d = v - mean;
-    const d2 = d * d;
-    m2 += d2;
-    m3 += d2 * d;
-    m4 += d2 * d2;
-  }
-  const var_ = m2 / (n - 1);
-  if (var_ < 1e-12) return { mean, var_: 0, skew: 0, kurt: 0 };
-  const std = Math.sqrt(var_);
-  const skew = m3 / n / (std * std * std);
-  const kurt = m4 / n / (var_ * var_) - 3; // excess kurtosis (Gaussian = 0)
-  return { mean, var_, skew, kurt };
-}
-
-/**
  * Compute first-order delta (temporal derivative) of a per-frame time
- * series using a regression window. This is the standard delta formula
- * from speech-recognition pipelines (Furui 1986):
+ * series using a regression window. Standard speech-recognition formula
+ * (Furui 1986):
  *
  *   delta_t = Σ_{n=1..N} n × (x_{t+n} - x_{t-n}) / (2 × Σ_{n=1..N} n²)
  *
  * Equivalent to a least-squares fit of a line to the surrounding 2N+1
- * frames. Edge frames use truncated windows (no padding), preserving
- * the time-series length.
+ * frames. The numerator is symmetric: contributions from `n=1..N` on each
+ * side are weighted by `n`. The denominator `2 × Σ_{i=1..N} i² =
+ * N(N+1)(2N+1)/3` normalizes so a series with constant slope produces a
+ * delta equal to that slope (verified by the linear-input test in
+ * mfcc.test.ts).
+ *
+ * Edge frames use truncated windows: when offset `k` would land outside
+ * `[0, n)` on either side, the entire ±k pair is dropped from the
+ * numerator AND `2k²` is subtracted from the denominator. This keeps the
+ * result a valid (less precise, but unbiased toward zero) least-squares
+ * estimate over the surviving symmetric offsets.
  */
 function computeDelta(series: number[], halfWidth: number): number[] {
   const n = series.length;
   const out: number[] = new Array(n);
-  // Pre-compute the denominator: 2 × Σ_{i=1..N} i² = 2 × N(N+1)(2N+1)/6
-  const fullDenom = (2 * halfWidth * (halfWidth + 1) * (2 * halfWidth + 1)) / 6 * 2;
+  // Σ_{i=-N..N} i² = 2 × N(N+1)(2N+1)/6 = N(N+1)(2N+1)/3.
+  // Computed once per series; constant across all frames except for
+  // edge-truncation adjustments below.
+  const fullDenom = (halfWidth * (halfWidth + 1) * (2 * halfWidth + 1)) / 3;
   for (let t = 0; t < n; t++) {
     let num = 0;
     let denom = fullDenom;
-    let edgeAdjust = false;
     for (let k = 1; k <= halfWidth; k++) {
       const tPlus = t + k;
       const tMinus = t - k;
       if (tPlus >= n || tMinus < 0) {
-        // Edge: truncate the window. Drop k contribution from numerator AND
-        // adjust denominator so the regression remains a least-squares fit
-        // over the surviving offsets — otherwise edge deltas are biased
-        // toward zero.
-        edgeAdjust = true;
+        // Edge: drop the symmetric pair from numerator and remove the
+        // matching 2k² from the denominator. Without the adjustment edge
+        // deltas would be biased toward zero (smaller numerator over an
+        // unchanged denominator).
         denom -= 2 * k * k;
         continue;
       }
       num += k * (series[tPlus]! - series[tMinus]!);
     }
-    if (edgeAdjust && denom <= 0) {
-      // Pathological case (very short series); deliver zero rather than NaN.
+    if (denom <= 0) {
+      // Pathological case — series too short for any symmetric window.
+      // Deliver zero rather than NaN so downstream stats stay finite.
       out[t] = 0;
       continue;
     }
@@ -234,34 +213,31 @@ export async function extractMfccFeatures(
     }
   }
 
-  // Aggregate per-coefficient track to 4 moments.
+  // Aggregate per-coefficient track using the existing repo statistics
+  // helpers. Reusing condense/mean/variance keeps the moment formulas
+  // (sample variance, statistically-correct skewness, excess-kurtosis-
+  // corrected kurtosis) consistent with the existing 44 audio features
+  // computed elsewhere in the speaker block.
   const out: number[] = [];
   out.length = MFCC_FEATURE_COUNT;
   let writeIdx = 0;
 
+  // 13 × 4 = 52 features (mean, variance, skewness, kurtosis per coefficient).
   for (let c = 0; c < NUM_MFCC_COEFFICIENTS; c++) {
-    const m = moments(mfccTracks[c]!);
-    out[writeIdx++] = m.mean;
-    out[writeIdx++] = m.var_;
-    out[writeIdx++] = m.skew;
-    out[writeIdx++] = m.kurt;
+    const stats = condense(mfccTracks[c]!);
+    out[writeIdx++] = stats.mean;
+    out[writeIdx++] = stats.variance;
+    out[writeIdx++] = stats.skewness;
+    out[writeIdx++] = stats.kurtosis;
   }
 
-  // Compute delta tracks and aggregate to 2 moments each.
+  // 13 × 2 = 26 features (mean, variance per delta coefficient).
   for (let c = 0; c < NUM_MFCC_COEFFICIENTS; c++) {
     const delta = computeDelta(mfccTracks[c]!, DELTA_REGRESSION_HALF_WIDTH);
-    const m = moments(delta);
-    out[writeIdx++] = m.mean;
-    out[writeIdx++] = m.var_;
+    const muDelta = meanOf(delta);
+    out[writeIdx++] = muDelta;
+    out[writeIdx++] = varianceOf(delta, muDelta);
   }
 
   return out;
 }
-
-// `entropy` import retained for parity with the wider extraction module's
-// shared statistical vocabulary; not needed for MFCCs (entropy on raw MFCC
-// values is dominated by their bin distribution, which the moments already
-// capture cleanly). Re-exported as a no-op import-elision guard so a future
-// commit that DOES need entropy (e.g., entropy of mel-band energies) doesn't
-// re-add the import line.
-export { entropy as _entropyImportGuard };

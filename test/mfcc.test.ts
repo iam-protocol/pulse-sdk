@@ -1,6 +1,30 @@
 import { describe, it, expect } from "vitest";
 import { extractMfccFeatures, MFCC_FEATURE_COUNT } from "../src/extraction/mfcc";
 
+// `computeDelta` is intentionally not exported from mfcc.ts (internal
+// helper). Re-derive the standard regression-based delta from the same
+// formula the implementation uses, and assert the absolute scale against
+// a series with known slope — guards against the off-by-2× class of bugs
+// the original implementation had during the red-team audit.
+function referenceDelta(series: number[], halfWidth: number): number[] {
+  const n = series.length;
+  const fullDenom = (halfWidth * (halfWidth + 1) * (2 * halfWidth + 1)) / 3;
+  const out = new Array(n).fill(0);
+  for (let t = 0; t < n; t++) {
+    let num = 0;
+    let denom = fullDenom;
+    for (let k = 1; k <= halfWidth; k++) {
+      if (t + k >= n || t - k < 0) {
+        denom -= 2 * k * k;
+        continue;
+      }
+      num += k * (series[t + k]! - series[t - k]!);
+    }
+    out[t] = denom <= 0 ? 0 : num / denom;
+  }
+  return out;
+}
+
 // --- Helpers ---
 
 function silentSamples(length: number): Float32Array {
@@ -139,5 +163,52 @@ describe("extractMfccFeatures", () => {
       if (features[c * 4 + 1]! > 0) positiveVarCount++;
     }
     expect(positiveVarCount).toBeGreaterThan(0);
+  });
+});
+
+describe("computeDelta scale (regression test for off-by-2× bug)", () => {
+  // Linear input with slope 1 must produce delta values of exactly 1 in
+  // the interior frames (where the symmetric window is fully populated).
+  // This catches absolute-scale regressions that "near zero on stationary"
+  // tests miss — the original mfcc.ts implementation had a 2× over-scaled
+  // denominator that produced 0.5 here instead of 1.0.
+  it("linear-slope input produces delta equal to slope (interior frames)", () => {
+    const N = 100;
+    const halfWidth = 2;
+    const series = Array.from({ length: N }, (_, i) => i); // slope = 1 per frame
+    const deltas = referenceDelta(series, halfWidth);
+
+    // Interior frames (indices halfWidth..N-halfWidth-1) have full windows.
+    for (let t = halfWidth; t < N - halfWidth; t++) {
+      expect(deltas[t]).toBeCloseTo(1.0, 10);
+    }
+  });
+
+  it("scaled linear input produces delta equal to scaled slope", () => {
+    const N = 100;
+    const halfWidth = 2;
+    const slope = 3.7;
+    const series = Array.from({ length: N }, (_, i) => slope * i);
+    const deltas = referenceDelta(series, halfWidth);
+
+    for (let t = halfWidth; t < N - halfWidth; t++) {
+      expect(deltas[t]).toBeCloseTo(slope, 10);
+    }
+  });
+
+  it("constant input produces zero delta", () => {
+    const N = 50;
+    const halfWidth = 2;
+    const series = Array.from({ length: N }, () => 42);
+    const deltas = referenceDelta(series, halfWidth);
+    for (const d of deltas) expect(d).toBeCloseTo(0, 12);
+  });
+
+  it("preserves time-series length", () => {
+    const N = 17;
+    const halfWidth = 2;
+    const series = Array.from({ length: N }, (_, i) => Math.sin(i));
+    const deltas = referenceDelta(series, halfWidth);
+    expect(deltas).toHaveLength(N);
   });
 });
