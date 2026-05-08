@@ -28,7 +28,6 @@
  * frequency-domain transforms of on-device-captured audio. Cannot
  * reconstruct intelligible speech.
  */
-import { dctII } from "./dct";
 import { mean as meanOf, variance as varianceOf } from "./statistics";
 import { sdkWarn } from "../log";
 
@@ -93,49 +92,59 @@ function cepstralPeakProminence(
   const N = powerSpectrum.length;
   if (N < 8) return 0;
 
-  // Take log of power spectrum with a floor to avoid log(0).
-  const FLOOR = 1e-12;
-  const logPower: number[] = new Array(N);
-  let allFinite = true;
-  for (let i = 0; i < N; i++) {
-    const p = Math.max(powerSpectrum[i]!, FLOOR);
-    const l = Math.log(p);
-    if (!Number.isFinite(l)) {
-      allFinite = false;
-      break;
-    }
-    logPower[i] = l;
-  }
-  if (!allFinite) return 0;
-
-  // Cepstrum via DCT-II of the log spectrum. Take the same number of
-  // coefficients as the spectrum length so the quefrency axis maps 1:1
-  // to sample index.
-  const cepstrum = dctII(logPower, N);
-
   const { qMin, qMax } = cppQuefrencyRange(sampleRate);
   if (qMax >= N || qMax <= qMin) return 0;
 
-  // Find peak in [qMin, qMax].
-  let peakIdx = qMin;
-  let peakVal = cepstrum[qMin]!;
-  for (let q = qMin + 1; q <= qMax; q++) {
-    if (cepstrum[q]! > peakVal) {
-      peakVal = cepstrum[q]!;
-      peakIdx = q;
-    }
+  // Take log of power spectrum with a floor to avoid log(0).
+  const FLOOR = 1e-12;
+  const logPower: number[] = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const p = Math.max(powerSpectrum[i]!, FLOOR);
+    const l = Math.log(p);
+    if (!Number.isFinite(l)) return 0;
+    logPower[i] = l;
   }
 
-  // Linear regression baseline across the search band: simple least-
-  // squares fit y = a + b × q over [qMin..qMax]. CPP = peak - baseline_at_peak_q.
-  const M = qMax - qMin + 1;
+  // Cepstrum via DCT-II of the log spectrum, computed ONLY over the
+  // quefrency band we need. Naive `dctII(logPower, N)` is O(N²) ≈ 1M ops
+  // per frame at N=1024; restricting the output range to [qMin..qMax]
+  // (≈ 200 bins for typical F0 60-400 Hz at 16 kHz) drops the cost to
+  // O(N × (qMax - qMin + 1)) ≈ 200k ops per frame — a 5× speedup. The
+  // baseline regression and peak-finding still run only over the band,
+  // so the full-N DCT was wasted work in the original implementation.
+  const bandLen = qMax - qMin + 1;
+  const cepstrumBand: number[] = new Array(bandLen);
+  const piOverN = Math.PI / N;
+  for (let bIdx = 0; bIdx < bandLen; bIdx++) {
+    const k = qMin + bIdx;
+    let sum = 0;
+    for (let n = 0; n < N; n++) {
+      sum += logPower[n]! * Math.cos(piOverN * (n + 0.5) * k);
+    }
+    cepstrumBand[bIdx] = sum;
+  }
+
+  // Find peak in the band.
+  let peakBIdx = 0;
+  let peakVal = cepstrumBand[0]!;
+  for (let bIdx = 1; bIdx < bandLen; bIdx++) {
+    if (cepstrumBand[bIdx]! > peakVal) {
+      peakVal = cepstrumBand[bIdx]!;
+      peakBIdx = bIdx;
+    }
+  }
+  const peakQuefrency = qMin + peakBIdx;
+
+  // Linear regression baseline: simple least-squares fit y = a + b × q
+  // over the same band. CPP = peak − baseline_at_peak_q.
+  const M = bandLen;
   let sx = 0;
   let sy = 0;
   let sxx = 0;
   let sxy = 0;
-  for (let q = qMin; q <= qMax; q++) {
-    const x = q;
-    const y = cepstrum[q]!;
+  for (let bIdx = 0; bIdx < bandLen; bIdx++) {
+    const x = qMin + bIdx;
+    const y = cepstrumBand[bIdx]!;
     sx += x;
     sy += y;
     sxx += x * x;
@@ -145,7 +154,7 @@ function cepstralPeakProminence(
   if (Math.abs(denom) < 1e-12) return 0;
   const slope = (M * sxy - sx * sy) / denom;
   const intercept = (sy - slope * sx) / M;
-  const baselineAtPeak = intercept + slope * peakIdx;
+  const baselineAtPeak = intercept + slope * peakQuefrency;
 
   return peakVal - baselineAtPeak;
 }

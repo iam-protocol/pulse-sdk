@@ -27,10 +27,6 @@ function referenceDelta(series: number[], halfWidth: number): number[] {
 
 // --- Helpers ---
 
-function silentSamples(length: number): Float32Array {
-  return new Float32Array(length);
-}
-
 function sineSamples(
   length: number,
   freqHz: number,

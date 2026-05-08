@@ -232,4 +232,50 @@ describe("extractVoiceQualityFeatures", () => {
     expect(features[4]).toBe(0);
     expect(features[5]).toBe(0);
   });
+
+  it("CPP detects periodic structure: harmonic stack produces higher CPP than white noise", async () => {
+    // CPP measures cepstral peak prominence in the F0 quefrency range. A
+    // synthetic harmonic stack (fundamental + harmonics) has strong
+    // periodic structure → high CPP. White noise has no periodic
+    // structure → low / near-zero CPP. This is the discriminative behavior
+    // CPP exists for; the assertion locks the math against future
+    // regressions in the cepstrum + baseline-regression implementation.
+    const f0Hz = 200;
+    const harmonicStack = multiToneSamples(
+      SESSION_LENGTH,
+      [f0Hz, 2 * f0Hz, 3 * f0Hz, 4 * f0Hz, 5 * f0Hz],
+    );
+    const f0Frames = new Array(numFramesOf(SESSION_LENGTH)).fill(f0Hz);
+    const harmonicFeatures = await extractVoiceQualityFeatures(
+      harmonicStack,
+      SAMPLE_RATE,
+      FRAME_SIZE,
+      HOP_SIZE,
+      f0Frames,
+    );
+
+    const noiseSampleArr = noiseSamples(SESSION_LENGTH, 99, 0.1);
+    const noiseFeatures = await extractVoiceQualityFeatures(
+      noiseSampleArr,
+      SAMPLE_RATE,
+      FRAME_SIZE,
+      HOP_SIZE,
+      f0Frames,
+    );
+
+    // cppMean is at index 0 of the feature vector.
+    const harmonicCpp = harmonicFeatures[0]!;
+    const noiseCpp = noiseFeatures[0]!;
+    expect(harmonicCpp).toBeGreaterThan(noiseCpp);
+  });
 });
+
+function noiseSamples(length: number, seed: number, amplitude: number): Float32Array {
+  let s = seed >>> 0;
+  const out = new Float32Array(length);
+  for (let i = 0; i < length; i++) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    out[i] = amplitude * (((s & 0xffff) / 0xffff) * 2 - 1);
+  }
+  return out;
+}
