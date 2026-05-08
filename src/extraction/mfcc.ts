@@ -183,14 +183,22 @@ export async function extractMfccFeatures(
   // pre-allocation pattern in speaker.ts::computeLTAS).
   const frame = new Float32Array(frameSize);
 
+  // Meyda.extract's third argument is `previousSignal`, NOT options — passing
+  // `{ sampleRate, bufferSize }` silently goes to that slot and is ignored.
+  // Configure Meyda's globals before extracting so the mel filter bank is
+  // built for the correct sample rate and frame size. Without this, Meyda
+  // uses default sampleRate=44100 / bufferSize=512 — producing MFCCs that
+  // are still self-consistent (same input → same output) but not aligned
+  // with the actual frequency content of our 16 kHz / 2048-sample frames,
+  // and not parity-comparable to librosa or other reference implementations.
+  Meyda.bufferSize = frameSize;
+  Meyda.sampleRate = sampleRate;
+
   for (let i = 0; i < numFrames; i++) {
     const start = i * hopSize;
     frame.set(samples.subarray(start, start + frameSize), 0);
 
-    const result = Meyda.extract("mfcc", frame, { sampleRate, bufferSize: frameSize }) as
-      | number[]
-      | null
-      | undefined;
+    const result = Meyda.extract("mfcc", frame) as number[] | null | undefined;
 
     if (!Array.isArray(result) || result.length !== NUM_MFCC_COEFFICIENTS) {
       // Skip frames where Meyda failed to extract MFCCs (typically silent

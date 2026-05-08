@@ -57,7 +57,10 @@ function noiseSamples(length: number, seed = 1, amplitude = 0.2): Float32Array {
 
 const SAMPLE_RATE = 16000;
 // 12 seconds of audio at 16kHz, the actual session length used in production.
-const SESSION_LENGTH = SAMPLE_RATE * 12;
+// 2 seconds is enough to produce ~190 analysis frames at hop 160 — verifies
+// feature correctness without the 12-second production session length that
+// would slow the unit test suite to >100s.
+const SESSION_LENGTH = SAMPLE_RATE * 2;
 // Frame size derived to match speaker.ts::getFrameSize logic for 16kHz.
 const FRAME_SIZE = 2048;
 const HOP_SIZE = 160; // 10ms at 16kHz, matches speaker.ts::getHopSize
