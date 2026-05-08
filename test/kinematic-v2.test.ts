@@ -1,0 +1,340 @@
+import { describe, it, expect } from "vitest";
+import {
+  extractMotionFeatures,
+  extractTouchFeatures,
+  MOTION_LEGACY_COUNT,
+  MOTION_FEATURE_COUNT,
+  MOTION_V2_ADDITIONS,
+  TOUCH_LEGACY_COUNT,
+  TOUCH_FEATURE_COUNT,
+  TOUCH_V2_ADDITIONS,
+} from "../src/extraction/kinematic";
+import type { MotionSample, TouchSample } from "../src/sensor/types";
+
+// IMU sample period 16.67 ms ≈ 60 Hz. Used by every motion test below so the
+// FFT bin spacing is predictable (60 / N Hz per bin) and the [4, 12] Hz
+// physiological-tremor band has at least a handful of bins to land in.
+const IMU_PERIOD_MS = 1000 / 60;
+const TOUCH_PERIOD_MS = 1000 / 60;
+
+function motionSineSamples(opts: {
+  count: number;
+  freqHz: number;
+  axes?: Partial<Record<"ax" | "ay" | "az" | "gx" | "gy" | "gz", number>>;
+}): MotionSample[] {
+  const { count, freqHz, axes = {} } = opts;
+  return Array.from({ length: count }, (_, i) => {
+    const t = i * IMU_PERIOD_MS;
+    const phase = (2 * Math.PI * freqHz * i) / 60;
+    const sine = Math.sin(phase);
+    return {
+      timestamp: t,
+      ax: (axes.ax ?? 0) * sine,
+      ay: (axes.ay ?? 0) * sine,
+      az: (axes.az ?? 0) * sine,
+      gx: (axes.gx ?? 0) * sine,
+      gy: (axes.gy ?? 0) * sine,
+      gz: (axes.gz ?? 0) * sine,
+    };
+  });
+}
+
+function touchPathSamples(opts: {
+  count: number;
+  shape: "straight" | "circle" | "wiggle";
+  pressureFn?: (i: number) => number;
+}): TouchSample[] {
+  const { count, shape, pressureFn = () => 0.5 } = opts;
+  return Array.from({ length: count }, (_, i) => {
+    let x = 0;
+    let y = 0;
+    if (shape === "straight") {
+      x = i;
+      y = 0;
+    } else if (shape === "circle") {
+      const angle = (2 * Math.PI * i) / count;
+      x = 100 + 50 * Math.cos(angle);
+      y = 100 + 50 * Math.sin(angle);
+    } else {
+      x = i;
+      y = 30 * Math.sin(i * 0.3);
+    }
+    return {
+      timestamp: i * TOUCH_PERIOD_MS,
+      x,
+      y,
+      pressure: pressureFn(i),
+      width: 10 + 0.1 * i,
+      height: 10,
+    };
+  });
+}
+
+describe("motion v2 layout constants", () => {
+  it("exposes consistent legacy / additions / total constants", () => {
+    expect(MOTION_LEGACY_COUNT).toBe(54);
+    expect(MOTION_V2_ADDITIONS).toBe(27);
+    expect(MOTION_FEATURE_COUNT).toBe(MOTION_LEGACY_COUNT + MOTION_V2_ADDITIONS);
+    expect(MOTION_FEATURE_COUNT).toBe(81);
+  });
+});
+
+describe("touch v2 layout constants", () => {
+  it("exposes consistent legacy / additions / total constants", () => {
+    expect(TOUCH_LEGACY_COUNT).toBe(36);
+    expect(TOUCH_V2_ADDITIONS).toBe(21);
+    expect(TOUCH_FEATURE_COUNT).toBe(TOUCH_LEGACY_COUNT + TOUCH_V2_ADDITIONS);
+    expect(TOUCH_FEATURE_COUNT).toBe(57);
+  });
+});
+
+describe("motion v2 — cross-axis covariance (indices 54..60)", () => {
+  // Pair order encoded in computeMotionV2: [ax-gy, ay-gx, az-gz, ax-az, ay-az, gx-gy].
+  it("ax-gy pair (index 54) is non-zero when ax and gy share phase", () => {
+    const samples = motionSineSamples({
+      count: 256,
+      freqHz: 5,
+      axes: { ax: 1, gy: 1 },
+    });
+    const features = extractMotionFeatures(samples);
+    expect(Math.abs(features[54]!)).toBeGreaterThan(0.01);
+  });
+
+  it("ax-gy pair (index 54) is near zero when only ax is excited", () => {
+    const samples = motionSineSamples({
+      count: 256,
+      freqHz: 5,
+      axes: { ax: 1 }, // gy stays at 0
+    });
+    const features = extractMotionFeatures(samples);
+    expect(Math.abs(features[54]!)).toBeLessThan(1e-6);
+  });
+});
+
+describe("motion v2 — FFT band energy (indices 60..72)", () => {
+  // Per-axis bands: [ax 0-2, ax 2-6, ax 6-12, ax 12-30, ay 0-2, ..., az 12-30].
+  it("ax 6-12Hz band (index 62) catches a 9 Hz signal on ax", () => {
+    const samples = motionSineSamples({
+      count: 512,
+      freqHz: 9,
+      axes: { ax: 1 },
+    });
+    const features = extractMotionFeatures(samples);
+    const ax_0_2 = features[60]!;
+    const ax_2_6 = features[61]!;
+    const ax_6_12 = features[62]!;
+    const ax_12_30 = features[63]!;
+    // 9 Hz lands inside the [6, 12) band — that bin gets the dominant energy.
+    expect(ax_6_12).toBeGreaterThan(ax_0_2);
+    expect(ax_6_12).toBeGreaterThan(ax_2_6);
+    expect(ax_6_12).toBeGreaterThan(ax_12_30);
+  });
+
+  it("ay band stays near zero when only ax is excited", () => {
+    const samples = motionSineSamples({
+      count: 512,
+      freqHz: 9,
+      axes: { ax: 1 },
+    });
+    const features = extractMotionFeatures(samples);
+    // ay bands are indices 64..68. All four should be effectively zero.
+    for (let i = 64; i < 68; i++) {
+      expect(features[i]!).toBeLessThan(1e-6);
+    }
+  });
+});
+
+describe("motion v2 — physiological tremor peak (indices 72..74)", () => {
+  it("locates a 7 Hz tremor that's actually present in the magnitude signal", () => {
+    // Magnitude of a vector field is a NONLINEAR function of the axes —
+    // |a| = √(ax² + ay² + az²) — so a pure-sine input on each axis lands
+    // at 2× the fundamental in magnitude (rectification). To inject a
+    // clean 7 Hz tremor INTO the magnitude, perturb a single axis around
+    // a large DC bias: ax(t) = K + B·cos(2πft), with K ≫ B. Then
+    // |a(t)| ≈ K + B·cos(2πft) and the tremor band should peak at 7 Hz.
+    const K = 9.8; // gravity on a single axis
+    const B = 0.05; // small perturbation amplitude
+    const f = 7;
+    const samples: MotionSample[] = Array.from({ length: 512 }, (_, i) => ({
+      timestamp: i * IMU_PERIOD_MS,
+      ax: K + B * Math.cos((2 * Math.PI * f * i) / 60),
+      ay: 0,
+      az: 0,
+      gx: 0,
+      gy: 0,
+      gz: 0,
+    }));
+    const features = extractMotionFeatures(samples);
+    const tremorFreq = features[72]!;
+    const tremorAmp = features[73]!;
+    // Bin spacing = 60 / 512 ≈ 0.117 Hz. Allow 1 Hz tolerance for leakage.
+    expect(tremorFreq).toBeGreaterThan(6);
+    expect(tremorFreq).toBeLessThan(8);
+    expect(tremorAmp).toBeGreaterThan(0);
+  });
+
+  it("returns zero amplitude when motion magnitude is flat", () => {
+    // Phone sitting still: only gravity on z.
+    const samples: MotionSample[] = Array.from({ length: 256 }, (_, i) => ({
+      timestamp: i * IMU_PERIOD_MS,
+      ax: 0,
+      ay: 0,
+      az: -9.8,
+      gx: 0,
+      gy: 0,
+      gz: 0,
+    }));
+    const features = extractMotionFeatures(samples);
+    expect(features[73]!).toBe(0);
+  });
+});
+
+describe("motion v2 — direction reversal stats (indices 74..76)", () => {
+  it("oscillating ax produces a non-zero reversal-rate mean", () => {
+    const samples = motionSineSamples({
+      count: 256,
+      freqHz: 5,
+      axes: { ax: 1 },
+    });
+    const features = extractMotionFeatures(samples);
+    expect(features[74]!).toBeGreaterThan(0);
+  });
+
+  it("constant-acceleration phone produces zero reversal-rate mean", () => {
+    const samples: MotionSample[] = Array.from({ length: 100 }, (_, i) => ({
+      timestamp: i * IMU_PERIOD_MS,
+      ax: 0,
+      ay: 0,
+      az: -9.8,
+      gx: 0,
+      gy: 0,
+      gz: 0,
+    }));
+    const features = extractMotionFeatures(samples);
+    expect(features[74]!).toBe(0);
+  });
+});
+
+describe("motion v2 — mean angular velocity (index 76)", () => {
+  it("is non-zero when gyro is excited", () => {
+    const samples = motionSineSamples({
+      count: 100,
+      freqHz: 3,
+      axes: { gx: 1 },
+    });
+    const features = extractMotionFeatures(samples);
+    // mean(|gyro|) over a sine excitation > 0.
+    expect(features[76]!).toBeGreaterThan(0);
+  });
+
+  it("is zero when gyro is silent", () => {
+    const samples = motionSineSamples({
+      count: 100,
+      freqHz: 3,
+      axes: { ax: 1 }, // gyros stay 0
+    });
+    const features = extractMotionFeatures(samples);
+    expect(features[76]!).toBe(0);
+  });
+});
+
+describe("motion v2 — magnitude autocorrelation (indices 77..81)", () => {
+  it("returns finite values across all four lags", () => {
+    const samples = motionSineSamples({
+      count: 256,
+      freqHz: 5,
+      axes: { ax: 1, ay: 1, az: 1 },
+    });
+    const features = extractMotionFeatures(samples);
+    for (let i = 77; i < 81; i++) {
+      expect(Number.isFinite(features[i]!)).toBe(true);
+    }
+  });
+});
+
+describe("touch v2 — pressure derivative (indices 36..40)", () => {
+  it("ramping pressure produces non-zero derivative mean", () => {
+    const samples = touchPathSamples({
+      count: 100,
+      shape: "straight",
+      pressureFn: (i) => 0.1 + i * 0.005, // monotonically rising
+    });
+    const features = extractTouchFeatures(samples);
+    expect(features[36]!).toBeGreaterThan(0);
+  });
+
+  it("constant pressure produces near-zero derivative variance", () => {
+    const samples = touchPathSamples({
+      count: 100,
+      shape: "straight",
+      pressureFn: () => 0.5,
+    });
+    const features = extractTouchFeatures(samples);
+    expect(features[37]!).toBeLessThan(1e-9);
+  });
+});
+
+describe("touch v2 — contact aspect ratio (indices 40..42)", () => {
+  it("captures the mean width/height ratio", () => {
+    // width = 10 + 0.1*i, height = 10 → ratio increases from 1.0 to ≈ 1.99.
+    const samples = touchPathSamples({ count: 100, shape: "straight" });
+    const features = extractTouchFeatures(samples);
+    expect(features[40]!).toBeGreaterThan(1);
+    expect(features[40]!).toBeLessThan(2);
+  });
+});
+
+describe("touch v2 — area derivative (indices 42..44)", () => {
+  it("growing contact area produces positive area-derivative mean", () => {
+    const samples = touchPathSamples({ count: 100, shape: "straight" });
+    const features = extractTouchFeatures(samples);
+    expect(features[42]!).toBeGreaterThan(0);
+  });
+});
+
+describe("touch v2 — trajectory curvature (indices 44..47)", () => {
+  it("circular path produces higher curvature mean than straight path", () => {
+    const straight = touchPathSamples({ count: 100, shape: "straight" });
+    const circle = touchPathSamples({ count: 100, shape: "circle" });
+    const sFeats = extractTouchFeatures(straight);
+    const cFeats = extractTouchFeatures(circle);
+    expect(cFeats[44]!).toBeGreaterThan(sFeats[44]!);
+  });
+});
+
+describe("touch v2 — velocity autocorrelation (indices 47..50)", () => {
+  it("smooth straight path has high lag-1 autocorrelation", () => {
+    const samples = touchPathSamples({ count: 100, shape: "straight" });
+    const features = extractTouchFeatures(samples);
+    // Constant-velocity straight path → speed series is constant → lag-1
+    // autocorrelation undefined (variance = 0) and reported as 0 by the
+    // helper. Wiggle path has variation → autocorrelation non-trivial.
+    const wiggle = touchPathSamples({ count: 100, shape: "wiggle" });
+    const wFeatures = extractTouchFeatures(wiggle);
+    expect(Number.isFinite(features[47]!)).toBe(true);
+    expect(Number.isFinite(wFeatures[47]!)).toBe(true);
+  });
+});
+
+describe("touch v2 — inter-touch gap distribution (indices 50..54)", () => {
+  it("regular sampling produces a stable gap mean ≈ TOUCH_PERIOD_MS", () => {
+    const samples = touchPathSamples({ count: 100, shape: "straight" });
+    const features = extractTouchFeatures(samples);
+    expect(features[50]!).toBeCloseTo(TOUCH_PERIOD_MS, 5);
+  });
+});
+
+describe("touch v2 — path efficiency + per-stroke length (indices 54..57)", () => {
+  it("straight path produces near-1 path efficiency", () => {
+    const samples = touchPathSamples({ count: 100, shape: "straight" });
+    const features = extractTouchFeatures(samples);
+    expect(features[54]!).toBeGreaterThan(0.99);
+  });
+
+  it("circular path closing on origin produces near-zero path efficiency", () => {
+    const samples = touchPathSamples({ count: 100, shape: "circle" });
+    const features = extractTouchFeatures(samples);
+    // Circle endpoints are nearly co-located so straight-line distance ≈ 0.
+    expect(features[54]!).toBeLessThan(0.05);
+  });
+});

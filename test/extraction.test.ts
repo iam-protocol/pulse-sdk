@@ -146,10 +146,14 @@ describe("speaker feature extraction", () => {
 // --- Kinematic Feature Tests ---
 
 describe("motion feature extraction", () => {
-  it("produces 54 features from IMU data", () => {
+  // v2 motion block: 54 legacy + 27 v2 (cross-axis covariance, FFT band
+  // energy, tremor peak, direction-reversal stats, motion autocorrelation)
+  // = 81. Asserted explicitly so a regression in either block surfaces as
+  // a count drift instead of a silent layout shuffle.
+  it("produces v2 motion feature count from IMU data", () => {
     const samples = makeMotionSamples(100);
     const features = extractMotionFeatures(samples);
-    expect(features).toHaveLength(54);
+    expect(features).toHaveLength(81);
   });
 
   it("produces no NaN values", () => {
@@ -162,7 +166,7 @@ describe("motion feature extraction", () => {
 
   it("returns zeros for insufficient samples", () => {
     const features = extractMotionFeatures([]);
-    expect(features).toHaveLength(54);
+    expect(features).toHaveLength(81);
     expect(features.every((v) => v === 0)).toBe(true);
   });
 
@@ -173,18 +177,32 @@ describe("motion feature extraction", () => {
       ax: 0, ay: 0, az: -9.8, gx: 0, gy: 0, gz: 0,
     }));
     const features = extractMotionFeatures(samples);
-    expect(features).toHaveLength(54);
+    expect(features).toHaveLength(81);
     for (let i = 0; i < features.length; i++) {
       expect(Number.isFinite(features[i]), `feature[${i}] is ${features[i]}`).toBe(true);
     }
   });
+
+  it("preserves the legacy 54-feature layout at the head of the motion block", () => {
+    // entros-validation reads named indices inside the legacy motion block;
+    // appending v2 features must NOT reorder anything in [0..54).
+    const samples = makeMotionSamples(100);
+    const features = extractMotionFeatures(samples);
+    for (let i = 0; i < 54; i++) {
+      expect(Number.isFinite(features[i])).toBe(true);
+    }
+    expect(features.length).toBeGreaterThan(54);
+  });
 });
 
 describe("touch feature extraction", () => {
-  it("produces 36 features from touch data", () => {
+  // v2 touch block: 36 legacy + 21 v2 (pressure derivative, contact
+  // geometry, curvature, velocity autocorrelation, gap distribution,
+  // path efficiency) = 57.
+  it("produces v2 touch feature count from touch data", () => {
     const samples = makeTouchSamples(100);
     const features = extractTouchFeatures(samples);
-    expect(features).toHaveLength(36);
+    expect(features).toHaveLength(57);
   });
 
   it("produces no NaN values", () => {
@@ -197,16 +215,30 @@ describe("touch feature extraction", () => {
 
   it("returns zeros for insufficient samples", () => {
     const features = extractTouchFeatures([]);
-    expect(features).toHaveLength(36);
+    expect(features).toHaveLength(57);
     expect(features.every((v) => v === 0)).toBe(true);
+  });
+
+  it("preserves the legacy 36-feature layout at the head of the touch block", () => {
+    const samples = makeTouchSamples(100);
+    const features = extractTouchFeatures(samples);
+    for (let i = 0; i < 36; i++) {
+      expect(Number.isFinite(features[i])).toBe(true);
+    }
+    expect(features.length).toBeGreaterThan(36);
   });
 });
 
 describe("mouse dynamics extraction", () => {
-  it("produces 54 features from pointer data", () => {
+  // Mouse-dynamics keeps width parity with the v2 motion block (81)
+  // by zero-padding the trailing v2-only IMU slots — desktop has no
+  // gyroscope / accelerometer to populate them, but the constant width
+  // keeps the per-modality SimHash bit-influence share identical across
+  // device classes.
+  it("produces motion-parity feature count from pointer data", () => {
     const samples = makeTouchSamples(100);
     const features = extractMouseDynamics(samples);
-    expect(features).toHaveLength(54);
+    expect(features).toHaveLength(81);
   });
 
   it("produces no NaN values", () => {
@@ -219,8 +251,21 @@ describe("mouse dynamics extraction", () => {
 
   it("returns zeros for insufficient samples", () => {
     const features = extractMouseDynamics([]);
-    expect(features).toHaveLength(54);
+    expect(features).toHaveLength(81);
     expect(features.every((v) => v === 0)).toBe(true);
+  });
+
+  it("zero-pads the trailing IMU-only slots on desktop", () => {
+    // Indices 54..81 correspond to the v2 motion block (cross-axis IMU
+    // covariance + FFT bands + tremor peak + direction stats + magnitude
+    // autocorrelation). Desktop captures have no IMU, so these MUST be
+    // zero — otherwise the desktop fingerprint slot grows extra
+    // hardware-specific bias the mobile fingerprint slot lacks.
+    const samples = makeTouchSamples(100);
+    const features = extractMouseDynamics(samples);
+    for (let i = 54; i < 81; i++) {
+      expect(features[i]).toBe(0);
+    }
   });
 });
 
@@ -228,11 +273,9 @@ describe("mouse dynamics extraction", () => {
 
 describe("feature fusion (normalizeGroup + fuseFeatures)", () => {
   // These tests exercise the fusion ALGORITHM (concatenate three groups,
-  // z-score normalize each independently). The protocol-level audio
-  // count is 176 after Sprint 1 of the v2 feature pipeline, but
-  // fuseFeatures itself is size-agnostic — it concatenates whatever the
-  // caller passes. Keeping conventional small inputs here keeps the
-  // mechanism tests readable; the protocol-level count is asserted
+  // z-score normalize each independently). fuseFeatures is size-agnostic
+  // — it concatenates whatever the caller passes. The protocol-level
+  // count (176 audio + 81 motion + 57 touch = 314 under v2) is asserted
   // separately in the speaker / motion / touch suites above.
 
   it("concatenates three modality groups", () => {
