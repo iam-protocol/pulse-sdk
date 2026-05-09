@@ -48,6 +48,28 @@ export const MFCC_FEATURE_COUNT =
 // = 52 + 26 = 78
 
 /**
+ * Apply standard pre-emphasis filter `H(z) = 1 - 0.97 z^-1` to the raw
+ * sample stream before MFCC framing. Boosts the high-frequency content
+ * where speaker-individual differences (F2/F3 formants, fricatives,
+ * breathiness) live; without it MFCCs are dominated by the F1 vocal-tract
+ * resonance which is less speaker-discriminative. Standard Kaldi/sidekit
+ * pipelines apply this; Meyda's MFCC extractor does not.
+ *
+ * Filter coefficient 0.97 is the conventional speech-recognition value
+ * (Furui 1981, ETSI ES 201 108). Returns a new buffer; does not mutate
+ * the input.
+ */
+function applyPreEmphasis(samples: Float32Array): Float32Array {
+  const out = new Float32Array(samples.length);
+  if (samples.length === 0) return out;
+  out[0] = samples[0]!;
+  for (let i = 1; i < samples.length; i++) {
+    out[i] = samples[i]! - 0.97 * samples[i - 1]!;
+  }
+  return out;
+}
+
+/**
  * Compute first-order delta (temporal derivative) of a per-frame time
  * series using a regression window. Standard speech-recognition formula
  * (Furui 1986):
@@ -194,9 +216,16 @@ export async function extractMfccFeatures(
   Meyda.bufferSize = frameSize;
   Meyda.sampleRate = sampleRate;
 
+  // Apply pre-emphasis once over the whole capture before framing. Boosts
+  // high-frequency content where F2/F3 + fricative differences between
+  // speakers live; without it MFCCs are dominated by F1 resonance which
+  // is less speaker-discriminative. Cheap (one O(n) pass), allocates one
+  // Float32Array of the input length.
+  const emphasized = applyPreEmphasis(samples);
+
   for (let i = 0; i < numFrames; i++) {
     const start = i * hopSize;
-    frame.set(samples.subarray(start, start + frameSize), 0);
+    frame.set(emphasized.subarray(start, start + frameSize), 0);
 
     const result = Meyda.extract("mfcc", frame) as number[] | null | undefined;
 
