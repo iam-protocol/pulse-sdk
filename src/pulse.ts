@@ -33,7 +33,15 @@ import {
   storeVerificationData,
   loadVerificationData,
   setPrivacyFallback,
+  recoverBaselineFromChain,
 } from "./identity/anchor";
+import {
+  BaselineWallet,
+  deriveEncryptedBaselinePda,
+  encryptBaselineBlob,
+  fingerprintToBytes,
+  getOrDeriveBaselineKey,
+} from "./identity/baseline";
 
 // Build-time constant. Replaced by tsup `define` (true when IAM_INTERNAL_TEST=1)
 // and by vitest `define`. In default builds (npm publish path) this is `false`
@@ -318,6 +326,66 @@ async function extractFingerprintAndValidate(
   return { ok: true, features, f0Contour, accelMagnitude, fingerprint, tbh, signedReceipt };
 }
 
+/**
+ * Resolve a `BaselineWallet` (just the `{ publicKey, signMessage }` surface
+ * required for the encrypted-baseline AES key derivation) from the wallet
+ * shape the host app supplies. Returns `null` when the wallet can't sign
+ * messages — e.g., some Ledger firmware versions, or any wallet adapter
+ * without `signMessage`. Callers gracefully skip the encrypted-baseline
+ * path in that case.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Wallet shape is supplied by host app
+function resolveBaselineWallet(wallet: any): BaselineWallet | null {
+  if (!wallet) return null;
+  const adapter = wallet.adapter ?? wallet;
+  if (!adapter?.publicKey || typeof adapter.signMessage !== "function") {
+    return null;
+  }
+  return {
+    publicKey: adapter.publicKey,
+    signMessage: adapter.signMessage.bind(adapter),
+  };
+}
+
+/**
+ * Build the 96-byte encrypted-baseline blob for the wallet's next on-chain
+ * write, best-effort: returns `undefined` (rather than throwing) when the
+ * wallet can't `signMessage`, AES key derivation fails, or any crypto
+ * primitive errors out. The submit path skips bundling the
+ * `set_encrypted_baseline` instruction in that case; the local-only
+ * baseline tier still works.
+ */
+async function buildEncryptedBaselineBlobBestEffort(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Wallet shape is supplied by host app
+  wallet: any,
+  fingerprint: number[],
+  salt: bigint,
+  commitmentBytes: Uint8Array,
+): Promise<Uint8Array | undefined> {
+  const baselineWallet = resolveBaselineWallet(wallet);
+  if (!baselineWallet) return undefined;
+  try {
+    const key = await getOrDeriveBaselineKey(baselineWallet);
+    const [baselinePda] = await deriveEncryptedBaselinePda(baselineWallet.publicKey);
+    const simhashBytes = fingerprintToBytes(fingerprint);
+    const saltBytes = bigintToBytes32(salt);
+    return await encryptBaselineBlob(
+      simhashBytes,
+      saltBytes,
+      key,
+      baselineWallet.publicKey,
+      baselinePda,
+      commitmentBytes,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sdkWarn(
+      `[Entros SDK] Encrypted-baseline build skipped (cross-device recovery unavailable this session): ${msg}`,
+    );
+    return undefined;
+  }
+}
+
 async function processSensorData(
   sensorData: SensorData,
   config: ResolvedConfig,
@@ -411,7 +479,7 @@ async function processSensorData(
   // Wallet-connected: check on-chain IdentityState PDA (source of truth).
   // Walletless: check localStorage for stored fingerprint.
   let isFirstVerification: boolean;
-  const previousData = await loadVerificationData();
+  let previousData = await loadVerificationData();
 
   if (wallet && connection) {
     const walletPubkey = wallet.adapter?.publicKey ?? wallet.publicKey;
@@ -437,8 +505,28 @@ async function processSensorData(
   }
 
   // Edge case: on-chain identity exists but local fingerprint is missing
-  // (cleared browser data, new device, different browser). Can't generate
-  // Hamming distance proof without the previous fingerprint.
+  // (cleared browser data, new device, different browser). Before forcing a
+  // reset, attempt to recover the baseline from the on-chain
+  // `EncryptedBaseline` PDA (master-list #98). Recovery requires the wallet
+  // to support `signMessage` for AES key derivation; on success, the
+  // recovered baseline is written to local storage and the flow continues
+  // into normal re-verification.
+  if (!isFirstVerification && !previousData && wallet && connection) {
+    const baselineWallet = resolveBaselineWallet(wallet);
+    if (baselineWallet) {
+      onProgress?.("Recovering baseline from chain...");
+      const recovery = await recoverBaselineFromChain(baselineWallet, connection);
+      if (recovery.recovered) {
+        previousData = await loadVerificationData();
+        sdkLog("[Entros SDK] On-chain encrypted baseline recovered");
+      } else {
+        sdkLog(
+          `[Entros SDK] On-chain encrypted baseline recovery not available (${recovery.reason ?? "unknown"})`,
+        );
+      }
+    }
+  }
+
   if (!isFirstVerification && !previousData) {
     return {
       success: false,
@@ -518,6 +606,18 @@ async function processSensorData(
   let submission;
 
   if (wallet && connection) {
+    // Best-effort: build the encrypted-baseline blob bound to the NEW
+    // commitment so `submitViaWallet` can bundle a `set_encrypted_baseline`
+    // ix into the same atomic transaction. Returns undefined when the
+    // wallet adapter lacks `signMessage` (e.g., some Ledger firmware) —
+    // the user falls back to local-only baseline storage gracefully.
+    const encryptedBaselineBlob = await buildEncryptedBaselineBlobBestEffort(
+      wallet,
+      tbh.fingerprint,
+      tbh.salt,
+      tbh.commitmentBytes,
+    );
+
     if (isFirstVerification) {
       // Pass the validator-signed receipt (when present) so submitViaWallet
       // can bundle an `Ed25519Program::verify` instruction before
@@ -534,6 +634,7 @@ async function processSensorData(
           relayerUrl: config.relayerUrl,
           relayerApiKey: config.relayerApiKey,
           signedReceipt,
+          encryptedBaselineBlob,
         }
       );
     } else {
@@ -543,6 +644,7 @@ async function processSensorData(
         isFirstVerification: false,
         relayerUrl: config.relayerUrl,
         relayerApiKey: config.relayerApiKey,
+        encryptedBaselineBlob,
       });
     }
   } else if (config.relayerUrl) {
@@ -653,12 +755,25 @@ async function processResetSensorData(
   }
   const { tbh } = extraction;
 
+  // Best-effort: build the encrypted-baseline blob bound to the NEW
+  // post-reset commitment so `submitResetViaWallet` can overwrite the
+  // on-chain blob in the same atomic transaction. Without this, the prior
+  // pre-reset blob would be stale on the next recovery attempt (auth-tag
+  // mismatch under the new commitment in AAD).
+  const encryptedBaselineBlob = await buildEncryptedBaselineBlobBestEffort(
+    wallet,
+    tbh.fingerprint,
+    tbh.salt,
+    tbh.commitmentBytes,
+  );
+
   onProgress?.("Submitting reset to Solana...");
   const submission = await submitResetViaWallet(tbh.commitmentBytes, {
     wallet,
     connection,
     relayerUrl: config.relayerUrl,
     relayerApiKey: config.relayerApiKey,
+    encryptedBaselineBlob,
   });
 
   // Persist the new local baseline on on-chain success. A throw here would
