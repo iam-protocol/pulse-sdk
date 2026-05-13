@@ -32,6 +32,50 @@ const IV_BYTES = 12;
 const HEADER_BYTES = 4; // version + algo + 2 reserved
 const PLAINTEXT_BYTES = 64; // simhash(32) || salt(32)
 
+// --- Bit packing (256-bit fingerprint <-> 32 bytes) ---
+
+/**
+ * Pack a 256-bit fingerprint into 32 bytes. LSB-first within each byte —
+ * the convention is internal to the encrypted-baseline blob; the only
+ * requirement is that `bytesToFingerprint` is its exact inverse.
+ */
+export function fingerprintToBytes(bits: number[]): Uint8Array {
+  if (bits.length !== 256) {
+    throw new Error(`expected 256-bit fingerprint, got ${bits.length}`);
+  }
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 256; i++) {
+    if (bits[i] === 1) {
+      out[i >> 3] = (out[i >> 3] ?? 0) | (1 << (i & 7));
+    }
+  }
+  return out;
+}
+
+/** Inverse of `fingerprintToBytes`. */
+export function bytesToFingerprint(bytes: Uint8Array): number[] {
+  if (bytes.length !== 32) {
+    throw new Error(`expected 32 bytes, got ${bytes.length}`);
+  }
+  const bits: number[] = new Array(256);
+  for (let i = 0; i < 256; i++) {
+    bits[i] = ((bytes[i >> 3] ?? 0) >> (i & 7)) & 1;
+  }
+  return bits;
+}
+
+/** Big-endian 32-byte → BigInt. Inverse of `bigintToBytes32` in hashing/poseidon. */
+export function bytes32ToBigint(bytes: Uint8Array): bigint {
+  if (bytes.length !== 32) {
+    throw new Error(`expected 32 bytes, got ${bytes.length}`);
+  }
+  let val = BigInt(0);
+  for (let i = 0; i < 32; i++) {
+    val = (val << BigInt(8)) | BigInt(bytes[i] ?? 0);
+  }
+  return val;
+}
+
 /**
  * Domain-separated signMessage payload. Wallet-friendly multi-line format
  * with an explicit "not a transaction" hint per Phantom/Solflare best
@@ -139,6 +183,51 @@ export async function deriveBaselineKey(
     false,
     ["encrypt", "decrypt"]
   );
+}
+
+// --- Session-scoped key cache ---
+
+// Promise-keyed cache: concurrent callers join the same in-flight derivation
+// rather than each prompting `signMessage`. On rejection the entry is evicted
+// before the error propagates, so a denied prompt can be retried on the next
+// call (e.g., user re-approves after misclicking "reject").
+const baselineKeyCache = new Map<string, Promise<CryptoKey>>();
+
+/**
+ * Derive the baseline AES key for `wallet`, reusing the cached derivation
+ * when one is in-flight or resolved for this wallet pubkey in the current
+ * page lifetime. The key is deterministic per wallet, so caching is purely
+ * a UX optimization (avoids re-prompting `signMessage` on every verification
+ * within a session). Cache survives a single page load and is dropped on
+ * reload or via `clearBaselineKeyCache`.
+ *
+ * Concurrent calls for the same wallet share one `signMessage` prompt; a
+ * failed derivation evicts the cache entry so subsequent calls re-derive.
+ */
+export async function getOrDeriveBaselineKey(
+  wallet: BaselineWallet
+): Promise<CryptoKey> {
+  const pubkeyBase58 = wallet.publicKey.toBase58();
+  const cached = baselineKeyCache.get(pubkeyBase58);
+  if (cached) return cached;
+  const pending = (async () => {
+    try {
+      return await deriveBaselineKey(wallet);
+    } catch (err) {
+      // Don't poison the cache with a rejected promise. The next call
+      // re-prompts, which is correct behavior after a transient wallet
+      // error or a user-cancelled prompt.
+      baselineKeyCache.delete(pubkeyBase58);
+      throw err;
+    }
+  })();
+  baselineKeyCache.set(pubkeyBase58, pending);
+  return pending;
+}
+
+/** Drop all cached baseline keys. Test hook + emergency wipe. */
+export function clearBaselineKeyCache(): void {
+  baselineKeyCache.clear();
 }
 
 // --- AAD ---
