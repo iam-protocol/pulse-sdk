@@ -48,6 +48,20 @@ export { attestAgentOperator, getAgentHumanOperator } from "./agent/anchor";
 export type { IdentityState, StoredVerificationData } from "./identity/types";
 export { fetchIdentityState, storeVerificationData, loadVerificationData } from "./identity/anchor";
 
+// Encrypted baseline (master-list #98) — wallet-keyed encrypted SimHash+salt
+// persisted on-chain in a per-wallet EncryptedBaseline PDA, recoverable
+// across devices via deterministic signMessage-derived AES-256-GCM key.
+export type { BaselineWallet } from "./identity/baseline";
+export {
+  deriveBaselineKey,
+  deriveEncryptedBaselinePda,
+  encryptBaselineBlob,
+  decryptBaselineBlob,
+  fetchEncryptedBaseline,
+  StaleEncryptedBaselineError,
+  ENCRYPTED_BASELINE_BLOB_BYTES,
+} from "./identity/baseline";
+
 // Sensor types
 export type { AudioCapture, MotionSample, TouchSample, SensorData, CaptureOptions, CaptureStage, StageState } from "./sensor/types";
 
