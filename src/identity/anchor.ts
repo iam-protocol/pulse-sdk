@@ -109,20 +109,26 @@ export async function fetchIdentityState(
     if (!accountInfo) return null;
 
     const coder = new anchor.BorshAccountsCoder(entrosAnchorIdl as Idl);
-    const decoded = coder.decode("identityState", accountInfo.data);
+    // Anchor 0.30+ IDL spec: account names are PascalCase and the
+    // BorshAccountsCoder lookup is strict — passing camelCase silently
+    // throws "Account not found" which the catch below swallows as null.
+    // The decoded object preserves the IDL's snake_case field names, so
+    // we destructure with snake_case before mapping to the public
+    // camelCase IdentityState type.
+    const decoded = coder.decode("IdentityState", accountInfo.data);
 
     return {
       owner: decoded.owner.toBase58(),
-      creationTimestamp: decoded.creationTimestamp.toNumber(),
-      lastVerificationTimestamp: decoded.lastVerificationTimestamp.toNumber(),
-      verificationCount: decoded.verificationCount,
-      trustScore: decoded.trustScore,
-      currentCommitment: new Uint8Array(decoded.currentCommitment),
+      creationTimestamp: decoded.creation_timestamp.toNumber(),
+      lastVerificationTimestamp: decoded.last_verification_timestamp.toNumber(),
+      verificationCount: decoded.verification_count,
+      trustScore: decoded.trust_score,
+      currentCommitment: new Uint8Array(decoded.current_commitment),
       mint: decoded.mint.toBase58(),
       // Anchor's Borsh coder returns the raw BN for i64 fields; .toNumber()
       // is safe here because Unix timestamps fit in Number.MAX_SAFE_INTEGER
       // until year 275760.
-      lastResetTimestamp: decoded.lastResetTimestamp?.toNumber?.() ?? 0,
+      lastResetTimestamp: decoded.last_reset_timestamp?.toNumber?.() ?? 0,
     };
   } catch {
     return null;
